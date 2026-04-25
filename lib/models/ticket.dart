@@ -8,6 +8,7 @@ class Ticket {
     required this.createdAt,
     required this.assignedBy,
     required this.buyerName,
+    required this.buyerContact,
   });
 
   final int id;
@@ -18,6 +19,7 @@ class Ticket {
   final DateTime createdAt;
   final int? assignedBy;
   final String? buyerName;
+  final String? buyerContact;
 
   Ticket copyWith({
     int? id,
@@ -28,8 +30,10 @@ class Ticket {
     DateTime? createdAt,
     int? assignedBy,
     String? buyerName,
+    String? buyerContact,
     bool clearSoldAt = false,
     bool clearBuyerName = false,
+    bool clearBuyerContact = false,
   }) {
     return Ticket(
       id: id ?? this.id,
@@ -40,6 +44,9 @@ class Ticket {
       createdAt: createdAt ?? this.createdAt,
       assignedBy: assignedBy ?? this.assignedBy,
       buyerName: clearBuyerName ? null : (buyerName ?? this.buyerName),
+      buyerContact: clearBuyerContact
+          ? null
+          : (buyerContact ?? this.buyerContact),
     );
   }
 
@@ -53,6 +60,7 @@ class Ticket {
       'created_at': createdAt.toIso8601String(),
       'assigned_by': assignedBy,
       'buyer_name': buyerName,
+      'buyer_contact': buyerContact,
     };
   }
 
@@ -68,6 +76,7 @@ class Ticket {
       createdAt: DateTime.parse(json['created_at'] as String),
       assignedBy: json['assigned_by'] as int?,
       buyerName: json['buyer_name'] as String?,
+      buyerContact: json['buyer_contact'] as String?,
     );
   }
 }

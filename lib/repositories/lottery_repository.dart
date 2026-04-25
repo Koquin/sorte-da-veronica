@@ -1,89 +1,252 @@
-import 'dart:convert';
-import 'dart:math';
+// ignore_for_file: avoid_print
 
+import 'package:bcrypt/bcrypt.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../mocks/mock_users.dart';
+import '../models/app_city.dart';
 import '../models/app_user.dart';
 import '../models/sale.dart';
 import '../models/ticket.dart';
 
-class LotteryRepository {
-  static const String _ticketsKey = 'tickets_v1';
-  static const String _salesKey = 'sales_v1';
-  static const String _sessionUserIdKey = 'session_user_id';
+void _log(String method, String message) {
+  print('In LotteryRepository, Method: $method, $message');
+}
 
-  final Random _random = Random();
+class LotteryRepository {
+  static const String _sessionTokenKey = 'session_token';
+  static const String _sessionExpiresAtKey = 'session_expires_at';
 
   SharedPreferences? _prefs;
+
+  String? _sessionToken;
+
   List<Ticket> _tickets = <Ticket>[];
   List<Sale> _sales = <Sale>[];
+  List<AppUser> _sellers = <AppUser>[];
+  List<AppCity> _cities = <AppCity>[];
   AppUser? _currentUser;
+  int? _currentCityId;
 
   AppUser? get currentUser => _currentUser;
   List<Ticket> get tickets => List<Ticket>.unmodifiable(_tickets);
   List<Sale> get sales => List<Sale>.unmodifiable(_sales);
+  List<AppUser> get sellers => List<AppUser>.unmodifiable(_sellers);
+  List<AppCity> get cities => List<AppCity>.unmodifiable(_cities);
+  int? get currentCityId => _currentCityId;
+
+  bool get isAdmin => _currentUser?.isAdmin == true;
+
+  SupabaseClient get _client => Supabase.instance.client;
+
+  String _stateSummary() {
+    return 'state={userId:${_currentUser?.id}, isAdmin:$isAdmin, cityId:$_currentCityId, '
+        'tickets:${_tickets.length}, sales:${_sales.length}, sellers:${_sellers.length}, '
+        'cities:${_cities.length}, hasToken:${_sessionToken != null}}';
+  }
 
   Future<void> init() async {
+    _log('init', 'Starting repository initialization | ${_stateSummary()}');
     _prefs = await SharedPreferences.getInstance();
-    await _loadTickets();
-    await _loadSales();
 
-    await _ensureSeedData();
+    final String? token = _prefs?.getString(_sessionTokenKey);
+    final String? expiresText = _prefs?.getString(_sessionExpiresAtKey);
 
-    final int? userId = _prefs!.getInt(_sessionUserIdKey);
-    if (userId != null) {
-      _currentUser = mockUsers
-          .where((AppUser user) => user.id == userId)
-          .firstOrNull;
+    if (token == null || expiresText == null) {
+      _log(
+        'init',
+        'No persisted session found, returning without login | ${_stateSummary()}',
+      );
+      return;
     }
+
+    final DateTime? expiresAt = DateTime.tryParse(expiresText);
+    if (expiresAt == null || DateTime.now().isAfter(expiresAt)) {
+      _log(
+        'init',
+        'Session expired or invalid, clearing session | expiresText=$expiresText',
+      );
+      await _clearSession();
+      return;
+    }
+
+    _sessionToken = token;
+
+    final bool valid = await _validateSessionAndBootstrap();
+    if (!valid) {
+      _log(
+        'init',
+        'Persisted session invalid on backend, clearing local session',
+      );
+      await _clearSession();
+      return;
+    }
+
+    _log(
+      'init',
+      'Repository initialized with active session | ${_stateSummary()}',
+    );
   }
 
   Future<bool> login({required String login, required String password}) async {
-    final String normalizedLogin = login.trim().toLowerCase();
-    final AppUser? user = mockUsers.where((AppUser item) {
-      return item.login.toLowerCase() == normalizedLogin &&
-          item.password == password;
-    }).firstOrNull;
+    _log('login', 'Attempting login for user "$login" | ${_stateSummary()}');
+    final dynamic loginPayloadRaw = await _client.rpc(
+      'app_get_login_payload',
+      params: <String, dynamic>{'p_login': login.trim()},
+    );
 
-    if (user == null) {
+    if (loginPayloadRaw == null) {
+      _log('login', 'Return: false (invalid credentials: login not found)');
       return false;
     }
 
-    _currentUser = user;
-    await _prefs?.setInt(_sessionUserIdKey, user.id);
+    final Map<String, dynamic> payload = Map<String, dynamic>.from(
+      loginPayloadRaw as Map,
+    );
+    final String? passwordHash = payload['password_hash'] as String?;
+    final int? cityId = payload['city_id'] as int?;
+    final Map<String, dynamic>? userJson = payload['user'] == null
+        ? null
+        : Map<String, dynamic>.from(payload['user'] as Map);
+
+    if (passwordHash == null || cityId == null || userJson == null) {
+      throw StateError(
+        'Payload de login invalido retornado pelo backend (campos ausentes).',
+      );
+    }
+
+    final bool passwordOk;
+    try {
+      passwordOk = BCrypt.checkpw(password, passwordHash);
+    } catch (e) {
+      throw StateError('Falha ao validar senha localmente: $e');
+    }
+
+    if (!passwordOk) {
+      _log('login', 'Return: false (invalid credentials from app-side check)');
+      return false;
+    }
+
+    final dynamic sessionRaw = await _client.rpc(
+      'app_create_session',
+      params: <String, dynamic>{
+        'p_user_id': userJson['id'],
+        'p_city_id': cityId,
+      },
+    );
+
+    if (sessionRaw == null) {
+      throw StateError('app_create_session retornou nulo.');
+    }
+
+    final Map<String, dynamic> session = Map<String, dynamic>.from(
+      sessionRaw as Map,
+    );
+    final String? token = session['token'] as String?;
+    final String? expiresAtText = session['expires_at'] as String?;
+
+    if (token == null || expiresAtText == null) {
+      throw StateError(
+        'Resposta invalida de app_create_session (token/expiracao ausentes).',
+      );
+    }
+
+    final DateTime? expiresAt = DateTime.tryParse(expiresAtText);
+    if (expiresAt == null) {
+      throw StateError('Data de expiracao da sessao invalida: $expiresAtText');
+    }
+
+    _sessionToken = token;
+
+    await _prefs?.setString(_sessionTokenKey, token);
+    await _prefs?.setString(_sessionExpiresAtKey, expiresAt.toIso8601String());
+
+    _applyAuthPayload(session);
+    await _bootstrap();
+    _log(
+      'login',
+      'Return: true (login success) | expiresAt=$expiresAt | ${_stateSummary()}',
+    );
     return true;
   }
 
   Future<void> logout() async {
+    _log('logout', 'Starting logout | ${_stateSummary()}');
+    final String? token = _sessionToken;
+    if (token != null) {
+      try {
+        await _client.rpc(
+          'app_logout',
+          params: <String, dynamic>{'p_token': token},
+        );
+      } catch (_) {
+        // Ignore logout errors and clear local session anyway.
+      }
+    }
+
+    await _clearSession();
     _currentUser = null;
-    await _prefs?.remove(_sessionUserIdKey);
+    _currentCityId = null;
+    _tickets = <Ticket>[];
+    _sales = <Sale>[];
+    _sellers = <AppUser>[];
+    _cities = <AppCity>[];
+    _log(
+      'logout',
+      'Logout finished and local state cleaned | ${_stateSummary()}',
+    );
+  }
+
+  Future<void> switchCity(int cityId) async {
+    _log('switchCity', 'Switching to cityId=$cityId | ${_stateSummary()}');
+    final String token = _requireToken();
+
+    await _client.rpc(
+      'app_switch_city',
+      params: <String, dynamic>{'p_token': token, 'p_city_id': cityId},
+    );
+
+    _currentCityId = cityId;
+    await _bootstrap();
+    _log('switchCity', 'City switched successfully | ${_stateSummary()}');
   }
 
   Future<void> refreshLocalData() async {
-    await _loadTickets();
-    await _loadSales();
-    _sales = _buildSalesFromSoldTickets();
-    await _saveSales();
+    _log(
+      'refreshLocalData',
+      'Refreshing local cache from backend | ${_stateSummary()}',
+    );
+    if (_sessionToken == null) {
+      _log(
+        'refreshLocalData',
+        'No session token found, returning without refresh',
+      );
+      return;
+    }
+    await _bootstrap();
+    _log('refreshLocalData', 'Refresh completed | ${_stateSummary()}');
   }
 
-  bool get isAdmin => _currentUser?.isAdmin == true;
-
-  List<AppUser> get sellers =>
-      mockUsers.where((AppUser user) => !user.isAdmin).toList();
-
   List<Ticket> searchTickets(String query) {
+    _log(
+      'searchTickets',
+      'Filtering tickets with query="$query" | totalTickets=${_tickets.length}',
+    );
     final String text = query.trim().toLowerCase();
-    final List<Ticket> accessible = accessibleTicketsForCurrentUser();
     if (text.isEmpty) {
-      return accessible.toList()
+      final List<Ticket> all = _tickets.toList()
         ..sort((Ticket a, Ticket b) => a.id.compareTo(b.id));
+      _log(
+        'searchTickets',
+        'Return: ${all.length} ticket(s) for empty query | ${_stateSummary()}',
+      );
+      return all;
     }
 
     final DateFormat dateFormat = DateFormat('dd/MM/yyyy');
 
-    return accessible.where((Ticket ticket) {
+    final List<Ticket> filtered = _tickets.where((Ticket ticket) {
       final String numbersString = ticket.numbers
           .map(formatNumber)
           .join(' ')
@@ -98,65 +261,120 @@ class LotteryRepository {
           buyer.contains(text) ||
           created.contains(text) ||
           sold.contains(text);
-    }).toList()..sort(
-      (Ticket a, Ticket b) => b.createdAt.compareTo(a.createdAt),
+    }).toList();
+
+    filtered.sort((Ticket a, Ticket b) => b.createdAt.compareTo(a.createdAt));
+    _log(
+      'searchTickets',
+      'Return: ${filtered.length} filtered ticket(s) | query="$query"',
     );
+    return filtered;
   }
 
   Future<void> generateTickets({required int quantity}) async {
-    if (!isAdmin) {
-      throw Exception('Apenas administradores podem gerar bilhetes.');
-    }
-    if (quantity <= 0) {
-      throw Exception('Informe uma quantidade valida.');
-    }
-    if (_tickets.length + quantity > 100) {
-      throw Exception('Limite maximo de 100 bilhetes atingido.');
-    }
+    _log(
+      'generateTickets',
+      'Generating quantity=$quantity | ${_stateSummary()}',
+    );
+    final String token = _requireToken();
 
-    final Set<int> usedNumbers = <int>{
-      for (final Ticket ticket in _tickets) ...ticket.numbers,
-    };
+    await _client.rpc(
+      'app_generate_tickets',
+      params: <String, dynamic>{'p_token': token, 'p_quantity': quantity},
+    );
 
-    final List<int> availableNumbers = <int>[];
-    for (int i = 1; i <= 10000; i++) {
-      if (!usedNumbers.contains(i)) {
-        availableNumbers.add(i);
-      }
-    }
+    await _bootstrap();
+    _log('generateTickets', 'Generation completed | ${_stateSummary()}');
+  }
 
-    if (availableNumbers.length < quantity * 4) {
-      throw Exception('Nao ha numeros suficientes para gerar novos bilhetes.');
-    }
+  Future<void> createCity({required String cityName}) async {
+    _log('createCity', 'Creating city "$cityName" | ${_stateSummary()}');
+    final String token = _requireToken();
 
-    int nextId = _nextTicketId();
-    final DateTime now = DateTime.now();
+    await _client.rpc(
+      'app_create_city',
+      params: <String, dynamic>{'p_token': token, 'p_name': cityName},
+    );
 
-    for (int i = 0; i < quantity; i++) {
-      final List<int> numbers = <int>[];
-      for (int n = 0; n < 4; n++) {
-        final int index = _random.nextInt(availableNumbers.length);
-        final int chosen = availableNumbers.removeAt(index);
-        numbers.add(chosen);
-      }
-      numbers.sort();
+    await _bootstrap();
+    _log('createCity', 'City created successfully | ${_stateSummary()}');
+  }
 
-      _tickets.add(
-        Ticket(
-          id: nextId,
-          numbers: numbers,
-          sellerId: null,
-          isSold: false,
-          soldAt: null,
-          createdAt: now,
-          assignedBy: null,
-          buyerName: null,
-        ),
-      );
-      nextId++;
-    }
+  Future<void> createSeller({
+    required String userName,
+    required String userContact,
+    required String login,
+    required String password,
+  }) async {
+    _log(
+      'createSeller',
+      'Creating seller login="$login" name="$userName" | ${_stateSummary()}',
+    );
+    final String token = _requireToken();
 
-    await _saveTickets();
+    final String passwordHash = BCrypt.hashpw(password, BCrypt.gensalt());
+
+    await _client.rpc(
+      'app_create_seller',
+      params: <String, dynamic>{
+        'p_token': token,
+        'p_user_name': userName,
+        'p_user_contact': userContact,
+        'p_login': login,
+        'p_password_hash': passwordHash,
+      },
+    );
+
+    await _bootstrap();
+    _log('createSeller', 'Seller created successfully | ${_stateSummary()}');
+  }
+
+  Future<void> updateSeller({
+    required int sellerId,
+    required String userName,
+    required String userContact,
+    required String login,
+    String? password,
+  }) async {
+    _log(
+      'updateSeller',
+      'Updating sellerId=$sellerId login="$login" name="$userName" | ${_stateSummary()}',
+    );
+    final String token = _requireToken();
+
+    final String? passwordHash = (password == null || password.trim().isEmpty)
+        ? null
+        : BCrypt.hashpw(password, BCrypt.gensalt());
+
+    await _client.rpc(
+      'app_update_seller',
+      params: <String, dynamic>{
+        'p_token': token,
+        'p_seller_id': sellerId,
+        'p_user_name': userName,
+        'p_user_contact': userContact,
+        'p_login': login,
+        'p_password_hash': passwordHash,
+      },
+    );
+
+    await _bootstrap();
+    _log('updateSeller', 'Seller updated successfully | ${_stateSummary()}');
+  }
+
+  Future<bool> deleteSeller({required int sellerId}) async {
+    _log('deleteSeller', 'Deleting sellerId=$sellerId | ${_stateSummary()}');
+    final String token = _requireToken();
+
+    final dynamic result = await _client.rpc(
+      'app_delete_seller',
+      params: <String, dynamic>{'p_token': token, 'p_seller_id': sellerId},
+    );
+
+    await _bootstrap();
+    final bool deleted = result == true;
+    _log('deleteSeller', 'Return: $deleted | ${_stateSummary()}');
+    return deleted;
   }
 
   Future<int> assignTicketsByRange({
@@ -164,29 +382,28 @@ class LotteryRepository {
     required int end,
     required int sellerId,
   }) async {
-    if (!isAdmin) {
-      throw Exception('Apenas administradores podem atribuir bilhetes.');
-    }
-    if (start < 1 || end > 10000 || start > end) {
-      throw Exception('Intervalo invalido.');
-    }
+    _log(
+      'assignTicketsByRange',
+      'Assign by range start=$start end=$end sellerId=$sellerId | ${_stateSummary()}',
+    );
+    final String token = _requireToken();
 
-    final int adminId = _currentUser!.id;
-    int updated = 0;
+    final dynamic result = await _client.rpc(
+      'app_assign_tickets_by_range',
+      params: <String, dynamic>{
+        'p_token': token,
+        'p_start': start,
+        'p_end': end,
+        'p_seller_id': sellerId,
+      },
+    );
 
-    _tickets = _tickets.map((Ticket ticket) {
-      final bool shouldAssign = ticket.numbers.any(
-        (int number) => number >= start && number <= end,
-      );
-      if (!shouldAssign) {
-        return ticket;
-      }
-
-      updated++;
-      return ticket.copyWith(sellerId: sellerId, assignedBy: adminId);
-    }).toList();
-
-    await _saveTickets();
+    await _bootstrap();
+    final int updated = (result as num?)?.toInt() ?? 0;
+    _log(
+      'assignTicketsByRange',
+      'Return: updated=$updated | ${_stateSummary()}',
+    );
     return updated;
   }
 
@@ -194,33 +411,27 @@ class LotteryRepository {
     required List<int> numbers,
     required int sellerId,
   }) async {
-    if (!isAdmin) {
-      throw Exception('Apenas administradores podem atribuir bilhetes.');
-    }
-    if (numbers.isEmpty) {
-      throw Exception('Informe ao menos um numero.');
-    }
+    _log(
+      'assignTicketsByNumbers',
+      'Assign by numbers count=${numbers.length} sellerId=$sellerId numbers=$numbers | ${_stateSummary()}',
+    );
+    final String token = _requireToken();
 
-    final Set<int> targetNumbers = numbers
-        .where((int number) => number >= 1 && number <= 10000)
-        .toSet();
-    if (targetNumbers.isEmpty) {
-      throw Exception('Numeros invalidos para atribuicao.');
-    }
+    final dynamic result = await _client.rpc(
+      'app_assign_tickets_by_numbers',
+      params: <String, dynamic>{
+        'p_token': token,
+        'p_numbers': numbers,
+        'p_seller_id': sellerId,
+      },
+    );
 
-    final int adminId = _currentUser!.id;
-    int updated = 0;
-
-    _tickets = _tickets.map((Ticket ticket) {
-      final bool shouldAssign = ticket.numbers.any(targetNumbers.contains);
-      if (!shouldAssign) {
-        return ticket;
-      }
-      updated++;
-      return ticket.copyWith(sellerId: sellerId, assignedBy: adminId);
-    }).toList();
-
-    await _saveTickets();
+    await _bootstrap();
+    final int updated = (result as num?)?.toInt() ?? 0;
+    _log(
+      'assignTicketsByNumbers',
+      'Return: updated=$updated | ${_stateSummary()}',
+    );
     return updated;
   }
 
@@ -228,301 +439,365 @@ class LotteryRepository {
     required int ticketId,
     required bool sold,
     String? buyerName,
+    String? buyerContact,
   }) async {
-    final int index = _tickets.indexWhere(
-      (Ticket ticket) => ticket.id == ticketId,
+    _log(
+      'toggleTicketSold',
+      'Updating ticketId=$ticketId sold=$sold buyerName=${buyerName ?? ''} buyerContact=${buyerContact ?? ''} | ${_stateSummary()}',
     );
-    if (index < 0) {
-      throw Exception('Bilhete nao encontrado.');
-    }
+    final String token = _requireToken();
 
-    final Ticket current = _tickets[index];
-    if (!isAdmin && current.sellerId != _currentUser?.id) {
-      throw Exception('Voce nao tem permissao para alterar este bilhete.');
-    }
-    if (!isAdmin && current.isSold) {
-      throw Exception(
-        'Bilhetes vendidos so podem ser alterados por administradores.',
-      );
-    }
-    if (sold && current.sellerId == null) {
-      throw Exception('Bilhete sem vendedor atribuido.');
-    }
+    await _client.rpc(
+      'app_toggle_ticket_sold',
+      params: <String, dynamic>{
+        'p_token': token,
+        'p_ticket_id': ticketId,
+        'p_is_sold': sold,
+        'p_buyer_name': buyerName,
+        'p_buyer_contact': buyerContact,
+      },
+    );
 
-    Ticket updated = current;
-    if (sold) {
-      updated = current.copyWith(
-        isSold: true,
-        soldAt: DateTime.now(),
-        buyerName: (buyerName ?? '').trim().isEmpty ? null : buyerName!.trim(),
-      );
-    } else {
-      updated = current.copyWith(
-        isSold: false,
-        clearSoldAt: true,
-        clearBuyerName: true,
-      );
-    }
-
-    _tickets[index] = updated;
-    _sales.removeWhere((Sale sale) => sale.ticketId == ticketId);
-
-    if (sold && updated.sellerId != null) {
-      _sales.add(
-        Sale(
-          id: _nextSaleId(),
-          ticketId: updated.id,
-          value: 2.0,
-          sellerId: updated.sellerId!,
-          createdAt: DateTime.now(),
-        ),
-      );
-    }
-
-    await _saveTickets();
-    await _saveSales();
+    await _bootstrap();
+    _log(
+      'toggleTicketSold',
+      'Ticket sale status updated successfully | ${_stateSummary()}',
+    );
   }
 
-  List<Ticket> accessibleTicketsForCurrentUser() {
-    if (isAdmin) {
-      return _tickets;
-    }
+  Future<bool> deleteTicketById({required int ticketId}) async {
+    _log(
+      'deleteTicketById',
+      'Deleting ticketId=$ticketId | ${_stateSummary()}',
+    );
+    final String token = _requireToken();
 
-    final int? userId = _currentUser?.id;
-    if (userId == null) {
-      return <Ticket>[];
-    }
+    final dynamic result = await _client.rpc(
+      'app_delete_ticket_by_id',
+      params: <String, dynamic>{'p_token': token, 'p_ticket_id': ticketId},
+    );
 
-    return _tickets
-        .where((Ticket ticket) => ticket.sellerId == userId)
-        .toList();
+    await _bootstrap();
+    final bool deleted = result == true;
+    _log('deleteTicketById', 'Return: $deleted | ${_stateSummary()}');
+    return deleted;
+  }
+
+  Future<bool> deleteTicketByNumber({required int number}) async {
+    _log(
+      'deleteTicketByNumber',
+      'Deleting by number=$number | ${_stateSummary()}',
+    );
+    final String token = _requireToken();
+
+    final dynamic result = await _client.rpc(
+      'app_delete_ticket_by_number',
+      params: <String, dynamic>{'p_token': token, 'p_number': number},
+    );
+
+    await _bootstrap();
+    final bool deleted = result == true;
+    _log('deleteTicketByNumber', 'Return: $deleted | ${_stateSummary()}');
+    return deleted;
+  }
+
+  Future<int> deleteTicketsByRange({
+    required int start,
+    required int end,
+  }) async {
+    _log(
+      'deleteTicketsByRange',
+      'Deleting tickets by range start=$start end=$end | ${_stateSummary()}',
+    );
+    final String token = _requireToken();
+
+    final dynamic result = await _client.rpc(
+      'app_delete_tickets_by_range',
+      params: <String, dynamic>{
+        'p_token': token,
+        'p_start': start,
+        'p_end': end,
+      },
+    );
+
+    await _bootstrap();
+    final int deleted = (result as num?)?.toInt() ?? 0;
+    _log('deleteTicketsByRange', 'Return: $deleted | ${_stateSummary()}');
+    return deleted;
+  }
+
+  Future<void> updateTicketNumbers({
+    required int ticketId,
+    required List<int> numbers,
+  }) async {
+    _log(
+      'updateTicketNumbers',
+      'Updating ticketId=$ticketId with numbers=$numbers | ${_stateSummary()}',
+    );
+    final String token = _requireToken();
+
+    await _client.rpc(
+      'app_update_ticket_numbers',
+      params: <String, dynamic>{
+        'p_token': token,
+        'p_ticket_id': ticketId,
+        'p_numbers': numbers,
+      },
+    );
+
+    await _bootstrap();
+    _log(
+      'updateTicketNumbers',
+      'Ticket updated successfully | ${_stateSummary()}',
+    );
   }
 
   String sellerNameById(int id) {
-    return mockUsers.where((AppUser user) => user.id == id).firstOrNull?.name ??
-        'Desconhecido';
+    _log('sellerNameById', 'Resolving seller name for id=$id');
+    if (_currentUser?.id == id) {
+      final String name = _currentUser?.name ?? 'Desconhecido';
+      _log('sellerNameById', 'Return: $name (current user)');
+      return name;
+    }
+
+    final AppUser? seller = _sellers
+        .where((AppUser u) => u.id == id)
+        .firstOrNull;
+    final String name = seller?.name ?? 'Desconhecido';
+    _log('sellerNameById', 'Return: $name');
+    return name;
+  }
+
+  String? sellerContactById(int id) {
+    _log('sellerContactById', 'Resolving seller contact for id=$id');
+    if (_currentUser?.id == id) {
+      final String? contact = _currentUser?.contact;
+      _log('sellerContactById', 'Return: ${contact ?? '-'} (current user)');
+      return contact;
+    }
+
+    final AppUser? seller = _sellers
+        .where((AppUser u) => u.id == id)
+        .firstOrNull;
+    final String? contact = seller?.contact;
+    _log('sellerContactById', 'Return: ${contact ?? '-'}');
+    return contact;
   }
 
   Map<int, int> soldQuantityBySeller() {
+    _log('soldQuantityBySeller', 'Calculating sold quantity grouped by seller');
     final Map<int, int> result = <int, int>{};
     for (final Ticket ticket in _tickets) {
       if (!ticket.isSold || ticket.sellerId == null) {
         continue;
       }
-      if (!isAdmin && ticket.sellerId != _currentUser?.id) {
-        continue;
-      }
       result[ticket.sellerId!] = (result[ticket.sellerId!] ?? 0) + 1;
     }
+    _log(
+      'soldQuantityBySeller',
+      'Return: ${result.length} seller group(s) data=$result',
+    );
+    return result;
+  }
+
+  Map<String, int> soldQuantityByBuyer() {
+    _log('soldQuantityByBuyer', 'Calculating sold quantity grouped by buyer');
+    final Map<String, int> result = <String, int>{};
+    for (final Ticket ticket in _tickets) {
+      if (!ticket.isSold) {
+        continue;
+      }
+
+      final String buyer =
+          (ticket.buyerName == null || ticket.buyerName!.trim().isEmpty)
+          ? 'Sem nome'
+          : ticket.buyerName!.trim();
+
+      result[buyer] = (result[buyer] ?? 0) + 1;
+    }
+
+    _log(
+      'soldQuantityByBuyer',
+      'Return: ${result.length} buyer group(s) data=$result',
+    );
     return result;
   }
 
   int soldTotalTickets() {
-    return soldQuantityBySeller().values.fold(
+    final int total = soldQuantityBySeller().values.fold(
       0,
       (int sum, int quantity) => sum + quantity,
     );
+    _log('soldTotalTickets', 'Return: total=$total | ${_stateSummary()}');
+    return total;
   }
 
   double soldTotalValue() {
-    return soldTotalTickets() * 2.0;
+    final double value = soldTotalTickets() * 2.0;
+    _log('soldTotalValue', 'Return: value=$value | ${_stateSummary()}');
+    return value;
   }
 
-  int _nextTicketId() {
-    if (_tickets.isEmpty) {
-      return 1;
-    }
-    return _tickets.map((Ticket ticket) => ticket.id).reduce(max) + 1;
-  }
-
-  int _nextSaleId() {
-    if (_sales.isEmpty) {
-      return 1;
-    }
-    return _sales.map((Sale sale) => sale.id).reduce(max) + 1;
-  }
-
-  Future<void> _loadTickets() async {
-    final String? encoded = _prefs?.getString(_ticketsKey);
-    if (encoded == null || encoded.isEmpty) {
-      _tickets = <Ticket>[];
-      return;
-    }
-
-    final List<dynamic> raw = jsonDecode(encoded) as List<dynamic>;
-    _tickets = raw
-        .map((dynamic item) => Ticket.fromJson(item as Map<String, dynamic>))
-        .toList();
-  }
-
-  Future<void> _saveTickets() async {
-    final String encoded = jsonEncode(
-      _tickets.map((Ticket t) => t.toJson()).toList(),
-    );
-    await _prefs?.setString(_ticketsKey, encoded);
-  }
-
-  Future<void> _loadSales() async {
-    final String? encoded = _prefs?.getString(_salesKey);
-    if (encoded == null || encoded.isEmpty) {
-      _sales = <Sale>[];
-      return;
-    }
-
-    final List<dynamic> raw = jsonDecode(encoded) as List<dynamic>;
-    _sales = raw
-        .map((dynamic item) => Sale.fromJson(item as Map<String, dynamic>))
-        .toList();
-  }
-
-  Future<void> _saveSales() async {
-    final String encoded = jsonEncode(
-      _sales.map((Sale s) => s.toJson()).toList(),
-    );
-    await _prefs?.setString(_salesKey, encoded);
-  }
-
-  Future<void> _ensureSeedData() async {
-    final List<AppUser> availableSellers = sellers;
-    if (availableSellers.isEmpty) {
-      return;
-    }
-
-    final DateTime now = DateTime.now();
-
-    if (_tickets.isNotEmpty) {
-      int soldCount = _tickets.where((Ticket ticket) => ticket.isSold).length;
-
-      if (soldCount < 30) {
-        int sellerIndex = 0;
-
-        for (int i = 0; i < _tickets.length && soldCount < 30; i++) {
-          final Ticket current = _tickets[i];
-          if (current.isSold) {
-            continue;
-          }
-
-          final int sellerId = current.sellerId ??
-              availableSellers[sellerIndex % availableSellers.length].id;
-          sellerIndex++;
-
-          _tickets[i] = current.copyWith(
-            isSold: true,
-            soldAt: now.subtract(Duration(days: soldCount % 15)),
-            sellerId: sellerId,
-            assignedBy: current.assignedBy ?? 1,
-            buyerName: 'Comprador ${current.id}',
-          );
-          soldCount++;
-        }
-
-        final Set<int> usedNumbers = <int>{
-          for (final Ticket ticket in _tickets) ...ticket.numbers,
-        };
-
-        int nextTicketId = _nextTicketId();
-        while (soldCount < 30 && _tickets.length < 100) {
-          final List<int> numbers = <int>[];
-          for (
-            int candidate = 1;
-            candidate <= 10000 && numbers.length < 4;
-            candidate++
-          ) {
-            if (!usedNumbers.contains(candidate)) {
-              usedNumbers.add(candidate);
-              numbers.add(candidate);
-            }
-          }
-
-          if (numbers.length < 4) {
-            break;
-          }
-
-          final AppUser seller =
-              availableSellers[soldCount % availableSellers.length];
-          _tickets.add(
-            Ticket(
-              id: nextTicketId,
-              numbers: numbers,
-              sellerId: seller.id,
-              isSold: true,
-              soldAt: now.subtract(Duration(days: soldCount % 15)),
-              createdAt: now,
-              assignedBy: 1,
-              buyerName: 'Comprador $nextTicketId',
-            ),
-          );
-          nextTicketId++;
-          soldCount++;
-        }
-      }
-
-      _sales = _buildSalesFromSoldTickets();
-      await _saveTickets();
-      await _saveSales();
-      return;
-    }
-
-    final List<Ticket> seededTickets = <Ticket>[];
-    final List<Sale> seededSales = <Sale>[];
-
-    for (int i = 0; i < 60; i++) {
-      final int base = (i * 4) + 1;
-      final AppUser seller = availableSellers[i % availableSellers.length];
-      final bool isSold = i < 30;
-
-      seededTickets.add(
-        Ticket(
-          id: i + 1,
-          numbers: <int>[base, base + 1, base + 2, base + 3],
-          sellerId: seller.id,
-          isSold: isSold,
-          soldAt: isSold ? now.subtract(Duration(days: i % 15)) : null,
-          createdAt: now.subtract(Duration(days: 30 - (i % 30))),
-          assignedBy: 1,
-          buyerName: isSold ? 'Comprador ${i + 1}' : null,
-        ),
+  Future<void> logError({
+    required String source,
+    required String message,
+    String? operation,
+    String? stackTrace,
+    Map<String, dynamic>? payload,
+  }) async {
+    try {
+      await _client.rpc(
+        'app_log_error',
+        params: <String, dynamic>{
+          'p_source': source,
+          'p_error_message': message,
+          'p_operation': operation,
+          'p_stack_trace': stackTrace,
+          'p_payload': payload,
+          'p_token': _sessionToken,
+        },
       );
-
-      if (isSold) {
-        seededSales.add(
-          Sale(
-            id: seededSales.length + 1,
-            ticketId: i + 1,
-            value: 2.0,
-            sellerId: seller.id,
-            createdAt: now.subtract(Duration(days: i % 15)),
-          ),
-        );
-      }
+    } catch (e) {
+      _log('logError', 'Failed to persist error log: $e');
     }
-
-    _tickets = seededTickets;
-    _sales = seededSales;
-    await _saveTickets();
-    await _saveSales();
-  }
-
-  List<Sale> _buildSalesFromSoldTickets() {
-    final List<Ticket> soldTickets = _tickets
-        .where((Ticket ticket) => ticket.isSold && ticket.sellerId != null)
-        .toList()
-      ..sort((Ticket a, Ticket b) => a.id.compareTo(b.id));
-
-    return soldTickets.asMap().entries.map((MapEntry<int, Ticket> entry) {
-      final Ticket ticket = entry.value;
-      return Sale(
-        id: entry.key + 1,
-        ticketId: ticket.id,
-        value: 2.0,
-        sellerId: ticket.sellerId!,
-        createdAt: ticket.soldAt ?? ticket.createdAt,
-      );
-    }).toList();
   }
 
   String formatNumber(int number) {
-    return number.toString().padLeft(4, '0');
+    final String formatted = number.toString().padLeft(4, '0');
+    _log('formatNumber', 'Return: $formatted from number=$number');
+    return formatted;
+  }
+
+  Future<bool> _validateSessionAndBootstrap() async {
+    _log(
+      '_validateSessionAndBootstrap',
+      'Validating session token in backend | ${_stateSummary()}',
+    );
+    final String token = _sessionToken!;
+
+    final dynamic raw = await _client.rpc(
+      'app_validate_session',
+      params: <String, dynamic>{'p_token': token},
+    );
+
+    if (raw == null) {
+      _log(
+        '_validateSessionAndBootstrap',
+        'Return: false (null response) | ${_stateSummary()}',
+      );
+      return false;
+    }
+
+    final Map<String, dynamic> payload = Map<String, dynamic>.from(raw as Map);
+    _applyAuthPayload(payload);
+    await _bootstrap();
+    _log('_validateSessionAndBootstrap', 'Return: true | ${_stateSummary()}');
+    return true;
+  }
+
+  void _applyAuthPayload(Map<String, dynamic> payload) {
+    _log(
+      '_applyAuthPayload',
+      'Applying auth payload to local state | payloadKeys=${payload.keys.toList()}',
+    );
+    final Map<String, dynamic> user = Map<String, dynamic>.from(
+      payload['user'] as Map? ?? <String, dynamic>{},
+    );
+    _currentUser = AppUser.fromJson(user);
+    _currentCityId = payload['city_id'] as int? ?? _currentUser?.cityId;
+    _log(
+      '_applyAuthPayload',
+      'Applied userId=${_currentUser?.id} cityId=$_currentCityId | ${_stateSummary()}',
+    );
+  }
+
+  Future<void> _bootstrap() async {
+    _log('_bootstrap', 'Loading bootstrap payload | ${_stateSummary()}');
+    final String token = _requireToken();
+
+    final dynamic raw = await _client.rpc(
+      'app_bootstrap',
+      params: <String, dynamic>{'p_token': token},
+    );
+
+    final Map<String, dynamic> data = Map<String, dynamic>.from(raw as Map);
+
+    final Map<String, dynamic> user = Map<String, dynamic>.from(
+      data['user'] as Map? ?? <String, dynamic>{},
+    );
+    _currentUser = AppUser.fromJson(user);
+
+    _currentCityId = data['city_id'] as int? ?? _currentCityId;
+
+    final List<dynamic> sellersRaw =
+        (data['sellers'] as List<dynamic>? ?? <dynamic>[]);
+    _sellers = sellersRaw
+        .map(
+          (dynamic item) =>
+              AppUser.fromJson(Map<String, dynamic>.from(item as Map)),
+        )
+        .where((AppUser item) => !item.isAdmin)
+        .toList();
+
+    final List<dynamic> citiesRaw =
+        (data['cities'] as List<dynamic>? ?? <dynamic>[]);
+    _cities = citiesRaw
+        .map(
+          (dynamic item) =>
+              AppCity.fromJson(Map<String, dynamic>.from(item as Map)),
+        )
+        .toList();
+
+    final List<dynamic> ticketsRaw =
+        (data['tickets'] as List<dynamic>? ?? <dynamic>[]);
+    _tickets = ticketsRaw
+        .map(
+          (dynamic item) =>
+              Ticket.fromJson(Map<String, dynamic>.from(item as Map)),
+        )
+        .toList();
+
+    _sales = _tickets
+        .where((Ticket ticket) => ticket.isSold && ticket.sellerId != null)
+        .toList()
+        .asMap()
+        .entries
+        .map(
+          (MapEntry<int, Ticket> entry) => Sale(
+            id: entry.key + 1,
+            ticketId: entry.value.id,
+            value: 2.0,
+            sellerId: entry.value.sellerId!,
+            createdAt: entry.value.soldAt ?? entry.value.createdAt,
+          ),
+        )
+        .toList();
+
+    _log(
+      '_bootstrap',
+      'Loaded user=${_currentUser?.id} city=$_currentCityId tickets=${_tickets.length} sellers=${_sellers.length} cities=${_cities.length} | ${_stateSummary()}',
+    );
+  }
+
+  String _requireToken() {
+    final String? token = _sessionToken;
+    if (token == null) {
+      _log('_requireToken', 'Throwing: session expired');
+      throw Exception('Sessao expirada. Faça login novamente.');
+    }
+    _log(
+      '_requireToken',
+      'Return: token available | tokenPrefix=${token.substring(0, token.length > 8 ? 8 : token.length)}***',
+    );
+    return token;
+  }
+
+  Future<void> _clearSession() async {
+    _log('_clearSession', 'Clearing persisted session | ${_stateSummary()}');
+    _sessionToken = null;
+    await _prefs?.remove(_sessionTokenKey);
+    await _prefs?.remove(_sessionExpiresAtKey);
+    _log('_clearSession', 'Session cleared | ${_stateSummary()}');
   }
 }
 
