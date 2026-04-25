@@ -1,6 +1,12 @@
+// ignore_for_file: avoid_print
+
 import 'package:flutter/material.dart';
 
 import '../viewmodels/app_view_model.dart';
+
+void _log(String method, String message) {
+  print('In LoginView, Method: $method, $message');
+}
 
 class LoginView extends StatefulWidget {
   const LoginView({super.key, required this.viewModel});
@@ -17,30 +23,42 @@ class _LoginViewState extends State<LoginView> {
 
   @override
   void dispose() {
+    _log('dispose', 'Disposing login controllers');
     _loginController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
 
   Future<void> _submit() async {
+    _log('_submit', 'Submitting login for user "${_loginController.text}"');
     final bool success = await widget.viewModel.login(
       _loginController.text,
       _passwordController.text,
     );
 
     if (!mounted) {
+      _log('_submit', 'Widget unmounted before handling result, returning');
       return;
     }
 
-    if (!success && widget.viewModel.errorMessage != null) {
+    if (!success) {
+      final String message =
+          widget.viewModel.errorMessage == 'Login ou senha invalidos.'
+          ? 'Dados incorretos'
+          : 'Erro ao fazer login';
+      _log('_submit', 'Login failed. Showing message="$message"');
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text(widget.viewModel.errorMessage!)));
+      ).showSnackBar(SnackBar(content: Text(message)));
+      return;
     }
+
+    _log('_submit', 'Login success');
   }
 
   @override
   Widget build(BuildContext context) {
+    _log('build', 'Building LoginView');
     return Scaffold(
       body: Container(
         decoration: const BoxDecoration(
@@ -84,7 +102,7 @@ class _LoginViewState extends State<LoginView> {
                     ),
                     const SizedBox(height: 12),
                     const Text(
-                      'Admin padrao: veronica / 123',
+                      'Admin padrao: V3R0N1C4 / V3R0N1C4',
                       style: TextStyle(fontSize: 12),
                     ),
                     const SizedBox(height: 20),
