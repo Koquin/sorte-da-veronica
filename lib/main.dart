@@ -24,35 +24,35 @@ Future<void> main() async {
   );
 
   _log('main', 'Supabase initialized, running app');
-  runApp(const SorteDaVeronicaApp());
+  runApp(const TheSorteApp());
 }
 
-class SorteDaVeronicaApp extends StatefulWidget {
-  const SorteDaVeronicaApp({super.key});
+class TheSorteApp extends StatefulWidget {
+  const TheSorteApp({super.key});
 
   @override
-  State<SorteDaVeronicaApp> createState() => _SorteDaVeronicaAppState();
+  State<TheSorteApp> createState() => _TheSorteAppState();
 }
 
-class _SorteDaVeronicaAppState extends State<SorteDaVeronicaApp> {
+class _TheSorteAppState extends State<TheSorteApp> {
   late final AppViewModel _viewModel;
 
   @override
   void initState() {
     super.initState();
-    _log('_SorteDaVeronicaAppState.initState', 'Creating ViewModel');
+    _log('_TheSorteAppState.initState', 'Creating ViewModel');
     _viewModel = AppViewModel(LotteryRepository());
     _viewModel.init();
   }
 
   @override
   Widget build(BuildContext context) {
-    _log('_SorteDaVeronicaAppState.build', 'Building root MaterialApp');
+    _log('_TheSorteAppState.build', 'Building root MaterialApp');
     return AnimatedBuilder(
       animation: _viewModel,
       builder: (BuildContext context, _) {
         return MaterialApp(
-          title: 'Sorte da Veronica',
+          title: 'THE Sorte',
           debugShowCheckedModeBanner: false,
           theme: ThemeData(
             colorScheme: ColorScheme.fromSeed(
@@ -73,18 +73,18 @@ class _SorteDaVeronicaAppState extends State<SorteDaVeronicaApp> {
   }
 
   Widget _buildHome() {
-    _log('_SorteDaVeronicaAppState._buildHome', 'Deciding initial route');
+    _log('_TheSorteAppState._buildHome', 'Deciding initial route');
     if (!_viewModel.initialized) {
-      _log('_SorteDaVeronicaAppState._buildHome', 'Showing loading screen');
+      _log('_TheSorteAppState._buildHome', 'Showing loading screen');
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
     if (!_viewModel.isLoggedIn) {
-      _log('_SorteDaVeronicaAppState._buildHome', 'Showing LoginView');
+      _log('_TheSorteAppState._buildHome', 'Showing LoginView');
       return LoginView(viewModel: _viewModel);
     }
 
-    _log('_SorteDaVeronicaAppState._buildHome', 'Showing HomeView');
+    _log('_TheSorteAppState._buildHome', 'Showing HomeView');
     return HomeView(viewModel: _viewModel);
   }
 }

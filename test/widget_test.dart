@@ -8,16 +8,16 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:sorte_da_veronica/main.dart';
+import 'package:the_sorte/main.dart';
 
 void main() {
   testWidgets('App starts and shows login', (WidgetTester tester) async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
-    await tester.pumpWidget(const SorteDaVeronicaApp());
+    await tester.pumpWidget(const TheSorteApp());
     await tester.pump();
     await tester.pump(const Duration(seconds: 1));
 
-    expect(find.text('Sorte da Veronica'), findsOneWidget);
+    expect(find.text('THE Sorte'), findsOneWidget);
     expect(find.text('Entrar'), findsOneWidget);
   });
 }
