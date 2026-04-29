@@ -435,6 +435,34 @@ class LotteryRepository {
     return updated;
   }
 
+  Future<int> assignTicketsByQuantity({
+    required int quantity,
+    required int sellerId,
+  }) async {
+    _log(
+      'assignTicketsByQuantity',
+      'Assign by quantity=$quantity sellerId=$sellerId | ${_stateSummary()}',
+    );
+    final String token = _requireToken();
+
+    final dynamic result = await _client.rpc(
+      'app_assign_tickets_by_quantity',
+      params: <String, dynamic>{
+        'p_token': token,
+        'p_quantity': quantity,
+        'p_seller_id': sellerId,
+      },
+    );
+
+    await _bootstrap();
+    final int updated = (result as num?)?.toInt() ?? 0;
+    _log(
+      'assignTicketsByQuantity',
+      'Return: updated=$updated | ${_stateSummary()}',
+    );
+    return updated;
+  }
+
   Future<void> toggleTicketSold({
     required int ticketId,
     required bool sold,
@@ -675,24 +703,53 @@ class LotteryRepository {
     );
     final String token = _sessionToken!;
 
-    final dynamic raw = await _client.rpc(
-      'app_validate_session',
-      params: <String, dynamic>{'p_token': token},
-    );
-
-    if (raw == null) {
-      _log(
-        '_validateSessionAndBootstrap',
-        'Return: false (null response) | ${_stateSummary()}',
+    try {
+      final dynamic raw = await _client.rpc(
+        'app_validate_session',
+        params: <String, dynamic>{'p_token': token},
       );
-      return false;
-    }
 
-    final Map<String, dynamic> payload = Map<String, dynamic>.from(raw as Map);
-    _applyAuthPayload(payload);
-    await _bootstrap();
-    _log('_validateSessionAndBootstrap', 'Return: true | ${_stateSummary()}');
-    return true;
+      if (raw == null) {
+        _log(
+          '_validateSessionAndBootstrap',
+          'Return: false (null response) | ${_stateSummary()}',
+        );
+        return false;
+      }
+
+      final Map<String, dynamic> payload = Map<String, dynamic>.from(
+        raw as Map,
+      );
+      _applyAuthPayload(payload);
+      await _bootstrap();
+      _log('_validateSessionAndBootstrap', 'Return: true | ${_stateSummary()}');
+      return true;
+    } catch (e, s) {
+      await logError(
+        source: 'LotteryRepository',
+        operation: '_validateSessionAndBootstrap',
+        message: e.toString(),
+        stackTrace: s.toString(),
+        payload: <String, dynamic>{'phase': 'init_session_validation'},
+      );
+
+      if (_isSessionInvalidError(e)) {
+        _log(
+          '_validateSessionAndBootstrap',
+          'Session invalid/expired, returning false to force login | error=$e',
+        );
+        return false;
+      }
+
+      rethrow;
+    }
+  }
+
+  bool _isSessionInvalidError(Object error) {
+    final String text = error.toString().toLowerCase();
+    return text.contains('sessao invalida') ||
+        text.contains('sessao expirada') ||
+        text.contains('sessao inexistente');
   }
 
   void _applyAuthPayload(Map<String, dynamic> payload) {

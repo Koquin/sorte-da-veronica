@@ -630,6 +630,8 @@ class _ManageTabState extends State<_ManageTab> {
   final TextEditingController _rangeStartController = TextEditingController();
   final TextEditingController _rangeEndController = TextEditingController();
   final TextEditingController _numbersController = TextEditingController();
+  final TextEditingController _quantityAssignController =
+      TextEditingController();
   final PageController _ticketCrudController = PageController(
     viewportFraction: 0.94,
   );
@@ -791,6 +793,43 @@ class _ManageTabState extends State<_ManageTab> {
     final String message = updated == null
         ? 'Nao foi possivel atribuir bilhetes agora. Tente novamente.'
         : '$updated bilhete(s) atribuido(s) por numeros.';
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _assignByQuantity() async {
+    _log(
+      '_ManageTabState._assignByQuantity',
+      'Assigning tickets by quantity via UI',
+    );
+    final int? sellerId = _safeSellerId(_selectedSellerId);
+    if (sellerId == null) {
+      _log(
+        '_ManageTabState._assignByQuantity',
+        'No seller selected, returning',
+      );
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Selecione um vendedor valido.')),
+      );
+      return;
+    }
+
+    final int quantity =
+        int.tryParse(_quantityAssignController.text.trim()) ?? -1;
+
+    final int? updated = await widget.viewModel.assignByQuantity(
+      quantity: quantity,
+      sellerId: sellerId,
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    final String message = updated == null
+        ? 'Nao foi possivel atribuir bilhetes agora. Tente novamente.'
+        : '$updated bilhete(s) atribuido(s) por quantidade.';
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
@@ -1786,6 +1825,22 @@ class _ManageTabState extends State<_ManageTab> {
                   onPressed: _assignByNumbers,
                   icon: const Icon(Icons.format_list_numbered),
                   label: const Text('Atribuir por números'),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _quantityAssignController,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Quantidade de bilhetes',
+                    border: OutlineInputBorder(),
+                    prefixIcon: Icon(Icons.shopping_cart_outlined),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                FilledButton.icon(
+                  onPressed: _assignByQuantity,
+                  icon: const Icon(Icons.assignment_outlined),
+                  label: const Text('Atribuir por quantidade'),
                 ),
               ],
             ),
