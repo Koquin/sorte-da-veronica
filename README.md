@@ -1,6 +1,6 @@
-# sorte_da_veronica
+# THE Sorte
 
-A new Flutter project.
+A Flutter project for THE Sorte.
 
 ## Getting Started
 

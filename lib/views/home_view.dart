@@ -630,6 +630,8 @@ class _ManageTabState extends State<_ManageTab> {
   final TextEditingController _rangeStartController = TextEditingController();
   final TextEditingController _rangeEndController = TextEditingController();
   final TextEditingController _numbersController = TextEditingController();
+  final TextEditingController _quantityAssignController =
+      TextEditingController();
   final PageController _ticketCrudController = PageController(
     viewportFraction: 0.94,
   );
@@ -729,8 +731,12 @@ class _ManageTabState extends State<_ManageTab> {
 
   Future<void> _assignByRange() async {
     _log('_ManageTabState._assignByRange', 'Assigning tickets by range via UI');
-    if (_selectedSellerId == null) {
+    final int? sellerId = _safeSellerId(_selectedSellerId);
+    if (sellerId == null) {
       _log('_ManageTabState._assignByRange', 'No seller selected, returning');
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Selecione um vendedor valido.')),
+      );
       return;
     }
 
@@ -740,7 +746,7 @@ class _ManageTabState extends State<_ManageTab> {
     final int? updated = await widget.viewModel.assignByRange(
       start: start,
       end: end,
-      sellerId: _selectedSellerId!,
+      sellerId: sellerId,
     );
 
     if (!mounted) {
@@ -760,8 +766,12 @@ class _ManageTabState extends State<_ManageTab> {
       '_ManageTabState._assignByNumbers',
       'Assigning tickets by explicit numbers via UI',
     );
-    if (_selectedSellerId == null) {
+    final int? sellerId = _safeSellerId(_selectedSellerId);
+    if (sellerId == null) {
       _log('_ManageTabState._assignByNumbers', 'No seller selected, returning');
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Selecione um vendedor valido.')),
+      );
       return;
     }
 
@@ -773,7 +783,7 @@ class _ManageTabState extends State<_ManageTab> {
 
     final int? updated = await widget.viewModel.assignByNumbers(
       numbers: numbers,
-      sellerId: _selectedSellerId!,
+      sellerId: sellerId,
     );
 
     if (!mounted) {
@@ -783,6 +793,43 @@ class _ManageTabState extends State<_ManageTab> {
     final String message = updated == null
         ? 'Nao foi possivel atribuir bilhetes agora. Tente novamente.'
         : '$updated bilhete(s) atribuido(s) por numeros.';
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _assignByQuantity() async {
+    _log(
+      '_ManageTabState._assignByQuantity',
+      'Assigning tickets by quantity via UI',
+    );
+    final int? sellerId = _safeSellerId(_selectedSellerId);
+    if (sellerId == null) {
+      _log(
+        '_ManageTabState._assignByQuantity',
+        'No seller selected, returning',
+      );
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Selecione um vendedor valido.')),
+      );
+      return;
+    }
+
+    final int quantity =
+        int.tryParse(_quantityAssignController.text.trim()) ?? -1;
+
+    final int? updated = await widget.viewModel.assignByQuantity(
+      quantity: quantity,
+      sellerId: sellerId,
+    );
+
+    if (!mounted) {
+      return;
+    }
+
+    final String message = updated == null
+        ? 'Nao foi possivel atribuir bilhetes agora. Tente novamente.'
+        : '$updated bilhete(s) atribuido(s) por quantidade.';
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
@@ -827,7 +874,7 @@ class _ManageTabState extends State<_ManageTab> {
 
     final String message = success
         ? 'Conta de vendedor criada com sucesso.'
-        : 'Nao foi possivel criar a conta de vendedor. Tente novamente.';
+        : _createSellerErrorMessage(widget.viewModel.errorMessage);
 
     if (success) {
       _sellerNameController.clear();
@@ -847,6 +894,31 @@ class _ManageTabState extends State<_ManageTab> {
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  String _createSellerErrorMessage(String? rawError) {
+    final String raw = (rawError ?? '').trim();
+    final String normalized = raw.toLowerCase();
+
+    if (normalized.contains('login ja existe')) {
+      return 'Login ja existe.';
+    }
+    if (normalized.contains('nome do vendedor e obrigatorio')) {
+      return 'Nome do vendedor e obrigatorio.';
+    }
+    if (normalized.contains(
+      'nome do vendedor deve ter no maximo 20 caracteres',
+    )) {
+      return 'Nome do vendedor deve ter no maximo 20 caracteres.';
+    }
+    if (normalized.contains('contato do vendedor deve conter 11 digitos')) {
+      return 'Contato do vendedor deve conter 11 digitos.';
+    }
+    if (normalized.contains('login do vendedor e obrigatorio')) {
+      return 'Login do vendedor e obrigatorio.';
+    }
+
+    return 'Ocorreu um erro ao criar conta de vendedor.';
   }
 
   Future<void> _updateSeller() async {
@@ -1189,6 +1261,11 @@ class _ManageTabState extends State<_ManageTab> {
                 ),
               ],
             ),
+            const SizedBox(height: 8),
+            const Text(
+              'Minimo: 1, Maximo 9999',
+              style: TextStyle(color: Colors.grey),
+            ),
           ],
           actionButton: FilledButton.icon(
             onPressed: _deleteTicketByRange,
@@ -1274,6 +1351,280 @@ class _ManageTabState extends State<_ManageTab> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: List<Widget>.generate(cards.length, (int index) {
             final bool selected = index == _currentCrudPage;
+            return AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              margin: const EdgeInsets.symmetric(horizontal: 3),
+              height: 7,
+              width: selected ? 18 : 7,
+              decoration: BoxDecoration(
+                color: selected
+                    ? const Color(0xFF1F6B46)
+                    : const Color(0xFFD2E9DB),
+                borderRadius: BorderRadius.circular(99),
+              ),
+            );
+          }),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSellerCrudCarousel(BuildContext context) {
+    final List<({String title, Widget card})>
+    cards = <({String title, Widget card})>[
+      (
+        title: 'Criar Conta de Vendedor',
+        card: _buildCrudCard(
+          context: context,
+          title: 'Criar Conta de Vendedor',
+          description: 'Cria uma conta de vendedor com perfil nao-admin.',
+          icon: Icons.person_add_alt_1,
+          content: <Widget>[
+            TextField(
+              controller: _sellerNameController,
+              inputFormatters: <TextInputFormatter>[
+                LengthLimitingTextInputFormatter(20),
+              ],
+              decoration: const InputDecoration(
+                labelText: 'Nome',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.badge_outlined),
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _sellerContactController,
+              keyboardType: TextInputType.phone,
+              inputFormatters: <TextInputFormatter>[
+                _BrazilPhoneTextInputFormatter(),
+              ],
+              decoration: const InputDecoration(
+                labelText: 'Contato',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.phone_outlined),
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _sellerLoginController,
+              decoration: const InputDecoration(
+                labelText: 'Login',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.alternate_email_outlined),
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _sellerPasswordController,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: 'Senha',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.password_outlined),
+              ),
+            ),
+          ],
+          actionButton: FilledButton.icon(
+            onPressed: _createSeller,
+            icon: const Icon(Icons.person_add),
+            label: const Text('Criar conta de vendedor'),
+          ),
+        ),
+      ),
+      (
+        title: 'Editar Conta de Vendedor',
+        card: _buildCrudCard(
+          context: context,
+          title: 'Editar Conta de Vendedor',
+          description:
+              'Atualiza nome, contato, login e opcionalmente senha do vendedor.',
+          icon: Icons.edit_note_outlined,
+          content: <Widget>[
+            DropdownButtonFormField<int>(
+              initialValue: _safeSellerId(_selectedSellerCrudId),
+              decoration: const InputDecoration(
+                labelText: 'Vendedor',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.person_outline),
+              ),
+              items: widget.viewModel.sellers.map((AppUser seller) {
+                return DropdownMenuItem<int>(
+                  value: seller.id,
+                  child: Text(seller.name),
+                );
+              }).toList(),
+              onChanged: (int? value) {
+                setState(() {
+                  _selectedSellerCrudId = value;
+                  _fillEditSellerFields(value);
+                });
+              },
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _editSellerNameController,
+              inputFormatters: <TextInputFormatter>[
+                LengthLimitingTextInputFormatter(20),
+              ],
+              decoration: const InputDecoration(
+                labelText: 'Nome',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.badge_outlined),
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _editSellerContactController,
+              keyboardType: TextInputType.phone,
+              inputFormatters: <TextInputFormatter>[
+                _BrazilPhoneTextInputFormatter(),
+              ],
+              decoration: const InputDecoration(
+                labelText: 'Contato',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.phone_outlined),
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _editSellerLoginController,
+              decoration: const InputDecoration(
+                labelText: 'Login',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.alternate_email_outlined),
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _editSellerPasswordController,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: 'Nova senha (opcional)',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.password_outlined),
+              ),
+            ),
+          ],
+          actionButton: FilledButton.icon(
+            onPressed: _updateSeller,
+            icon: const Icon(Icons.save_outlined),
+            label: const Text('Salvar alteracoes'),
+          ),
+        ),
+      ),
+      (
+        title: 'Excluir Conta de Vendedor',
+        card: _buildCrudCard(
+          context: context,
+          title: 'Excluir Conta de Vendedor',
+          description: 'Remove a conta do vendedor selecionado.',
+          icon: Icons.person_remove_outlined,
+          content: <Widget>[
+            DropdownButtonFormField<int>(
+              initialValue: _safeSellerId(_selectedSellerCrudId),
+              decoration: const InputDecoration(
+                labelText: 'Vendedor',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.person_outline),
+              ),
+              items: widget.viewModel.sellers.map((AppUser seller) {
+                return DropdownMenuItem<int>(
+                  value: seller.id,
+                  child: Text(seller.name),
+                );
+              }).toList(),
+              onChanged: (int? value) {
+                setState(() {
+                  _selectedSellerCrudId = value;
+                  _fillEditSellerFields(value);
+                });
+              },
+            ),
+          ],
+          actionButton: FilledButton.icon(
+            onPressed: _deleteSeller,
+            icon: const Icon(Icons.delete_forever_outlined),
+            label: const Text('Excluir conta de vendedor'),
+          ),
+        ),
+      ),
+    ];
+
+    final bool hasLeft = _currentSellerCrudPage > 0;
+    final bool hasRight = _currentSellerCrudPage < cards.length - 1;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        SizedBox(
+          height: 360,
+          child: Stack(
+            children: <Widget>[
+              PageView.builder(
+                controller: _sellerCrudController,
+                itemCount: cards.length,
+                onPageChanged: (int index) {
+                  setState(() {
+                    _currentSellerCrudPage = index;
+                  });
+                },
+                itemBuilder: (BuildContext context, int index) {
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                    child: SizedBox.expand(child: cards[index].card),
+                  );
+                },
+              ),
+              if (hasLeft)
+                Positioned(
+                  left: 2,
+                  top: 0,
+                  bottom: 0,
+                  child: Center(
+                    child: Material(
+                      color: Colors.white.withValues(alpha: 0.9),
+                      shape: const CircleBorder(),
+                      child: IconButton(
+                        onPressed: () {
+                          _sellerCrudController.previousPage(
+                            duration: const Duration(milliseconds: 220),
+                            curve: Curves.easeOut,
+                          );
+                        },
+                        icon: const Icon(Icons.arrow_back_ios_new_rounded),
+                      ),
+                    ),
+                  ),
+                ),
+              if (hasRight)
+                Positioned(
+                  right: 2,
+                  top: 0,
+                  bottom: 0,
+                  child: Center(
+                    child: Material(
+                      color: Colors.white.withValues(alpha: 0.9),
+                      shape: const CircleBorder(),
+                      child: IconButton(
+                        onPressed: () {
+                          _sellerCrudController.nextPage(
+                            duration: const Duration(milliseconds: 220),
+                            curve: Curves.easeOut,
+                          );
+                        },
+                        icon: const Icon(Icons.arrow_forward_ios_rounded),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 10),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: List<Widget>.generate(cards.length, (int index) {
+            final bool selected = index == _currentSellerCrudPage;
             return AnimatedContainer(
               duration: const Duration(milliseconds: 180),
               margin: const EdgeInsets.symmetric(horizontal: 3),
@@ -1397,63 +1748,8 @@ class _ManageTabState extends State<_ManageTab> {
                 ),
               ],
             ),
-            _buildSectionContainer(
-              context: context,
-              title: 'Criar Conta de Vendedor',
-              subtitle: 'Conta de vendedor sempre com perfil não-admin',
-              icon: Icons.person_add_alt_1,
-              children: <Widget>[
-                TextField(
-                  controller: _sellerNameController,
-                  inputFormatters: <TextInputFormatter>[
-                    LengthLimitingTextInputFormatter(20),
-                  ],
-                  decoration: const InputDecoration(
-                    labelText: 'Nome',
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.badge_outlined),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _sellerContactController,
-                  keyboardType: TextInputType.phone,
-                  inputFormatters: <TextInputFormatter>[
-                    _BrazilPhoneTextInputFormatter(),
-                  ],
-                  decoration: const InputDecoration(
-                    labelText: 'Contato',
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.phone_outlined),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _sellerLoginController,
-                  decoration: const InputDecoration(
-                    labelText: 'Login',
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.alternate_email_outlined),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _sellerPasswordController,
-                  obscureText: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Senha',
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.password_outlined),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                FilledButton.icon(
-                  onPressed: _createSeller,
-                  icon: const Icon(Icons.person_add),
-                  label: const Text('Criar conta de vendedor'),
-                ),
-              ],
-            ),
+            _buildSellerCrudCarousel(context),
+            const SizedBox(height: 16),
             _buildTicketCrudCarousel(context),
             const SizedBox(height: 16),
             _buildSectionContainer(
@@ -1463,7 +1759,7 @@ class _ManageTabState extends State<_ManageTab> {
               icon: Icons.hub_outlined,
               children: <Widget>[
                 DropdownButtonFormField<int>(
-                  initialValue: _selectedSellerId,
+                  initialValue: _safeSellerId(_selectedSellerId),
                   decoration: const InputDecoration(
                     labelText: 'Vendedor',
                     border: OutlineInputBorder(),
@@ -1529,6 +1825,22 @@ class _ManageTabState extends State<_ManageTab> {
                   onPressed: _assignByNumbers,
                   icon: const Icon(Icons.format_list_numbered),
                   label: const Text('Atribuir por números'),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _quantityAssignController,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Quantidade de bilhetes',
+                    border: OutlineInputBorder(),
+                    prefixIcon: Icon(Icons.shopping_cart_outlined),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                FilledButton.icon(
+                  onPressed: _assignByQuantity,
+                  icon: const Icon(Icons.assignment_outlined),
+                  label: const Text('Atribuir por quantidade'),
                 ),
               ],
             ),
@@ -1681,15 +1993,48 @@ class _StatsTab extends StatelessWidget {
                 padding: EdgeInsets.symmetric(vertical: 24),
                 child: Text('Nenhuma venda registrada para este vendedor.'),
               )
-            else
-              ...clientEntries.map((MapEntry<String, int> entry) {
+            else ...<Widget>[
+              SizedBox(
+                height: 260,
+                child: PieChart(
+                  PieChartData(
+                    sectionsSpace: 2,
+                    centerSpaceRadius: 42,
+                    sections: clientEntries.asMap().entries.map((
+                      MapEntry<int, MapEntry<String, int>> item,
+                    ) {
+                      final Color color =
+                          Colors.primaries[item.key % Colors.primaries.length];
+                      return PieChartSectionData(
+                        color: color,
+                        value: item.value.value.toDouble(),
+                        title: '${item.value.value}',
+                        radius: 72,
+                        titleStyle: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 12,
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              ...clientEntries.asMap().entries.map((
+                MapEntry<int, MapEntry<String, int>> item,
+              ) {
+                final Color color =
+                    Colors.primaries[item.key % Colors.primaries.length];
                 return Card(
                   child: ListTile(
-                    title: Text(entry.key),
-                    trailing: Text('${entry.value} bilhete(s)'),
+                    leading: CircleAvatar(backgroundColor: color, radius: 8),
+                    title: Text(item.value.key),
+                    trailing: Text('${item.value.value} bilhete(s)'),
                   ),
                 );
               }),
+            ],
           ],
         ],
       ),

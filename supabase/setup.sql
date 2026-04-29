@@ -214,11 +214,10 @@ declare
 begin
   select * into v_session
   from app_session s
-  where s.token = p_token
-    and s.expires_at > now();
+  where s.token = p_token;
 
   if not found then
-    raise exception 'Sessao invalida ou expirada.';
+    raise exception 'Sessao inexistente.';
   end if;
 
   select * into v_user from app_user u where u.id = v_session.user_id;
@@ -379,14 +378,24 @@ security definer
 set search_path = public
 as $$
 declare
-  v_ctx record;
+  v_session app_session%rowtype;
   v_user app_user%rowtype;
 begin
-  select * into v_ctx from app_get_session_user(p_token);
-  select * into v_user from app_user where id = v_ctx.user_id;
+  select * into v_session
+  from app_session s
+  where s.token = p_token;
+
+  if not found then
+    return null;
+  end if;
+
+  select * into v_user from app_user where id = v_session.user_id;
+  if not found then
+    return null;
+  end if;
 
   return jsonb_build_object(
-    'city_id', v_ctx.city_id,
+    'city_id', v_session.city_id,
     'user', jsonb_build_object(
       'id', v_user.id,
       'user_name', v_user.user_name,
@@ -1049,6 +1058,56 @@ begin
       where tn.ticket_id = t.id
         and tn.city_id = v_ctx.city_id
         and tn.number = any(v_formatted)
+    );
+
+  get diagnostics v_updated = row_count;
+  return v_updated;
+end;
+$$;
+
+create or replace function app_assign_tickets_by_quantity(
+  p_token text,
+  p_quantity integer,
+  p_seller_id bigint
+)
+returns integer
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_ctx record;
+  v_updated integer;
+begin
+  select * into v_ctx from app_get_session_user(p_token);
+
+  if not v_ctx.is_admin then
+    raise exception 'Apenas administradores podem atribuir bilhetes.';
+  end if;
+
+  if p_quantity is null or p_quantity <= 0 then
+    raise exception 'Quantidade invalida.';
+  end if;
+
+  if not exists (
+    select 1 from app_user u
+    where u.id = p_seller_id and u.is_admin = false
+  ) then
+    raise exception 'Vendedor invalido.';
+  end if;
+
+  update ticket t
+  set seller_id = p_seller_id,
+      assigned_by = v_ctx.user_id
+  where t.city_id = v_ctx.city_id
+    and t.seller_id is null
+    and t.id in (
+      select t2.id
+      from ticket t2
+      where t2.city_id = v_ctx.city_id
+        and t2.seller_id is null
+      order by t2.id
+      limit p_quantity
     );
 
   get diagnostics v_updated = row_count;

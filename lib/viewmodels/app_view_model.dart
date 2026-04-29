@@ -305,6 +305,29 @@ class AppViewModel extends ChangeNotifier {
     return result;
   }
 
+  Future<int?> assignByQuantity({
+    required int quantity,
+    required int sellerId,
+  }) async {
+    _log(
+      'assignByQuantity',
+      'Assigning by quantity=$quantity sellerId=$sellerId | ${_stateSummary()}',
+    );
+    int? updated;
+    final bool success = await _runAction(() async {
+      updated = await _repository.assignTicketsByQuantity(
+        quantity: quantity,
+        sellerId: sellerId,
+      );
+    });
+    final int? result = success ? updated : null;
+    _log(
+      'assignByQuantity',
+      'Return: ${result ?? 'null'} | ${_stateSummary()}',
+    );
+    return result;
+  }
+
   Future<bool> toggleTicketSold({
     required int ticketId,
     required bool sold,
@@ -444,12 +467,33 @@ class AppViewModel extends ChangeNotifier {
     StackTrace? stackTrace,
     Map<String, dynamic>? payload,
   }) async {
+    final Map<String, dynamic> extra = <String, dynamic>{};
+    if (payload != null) {
+      extra.addAll(payload);
+    }
+
+    // Try to extract PostgrestException details when available without
+    // importing postgrest directly (avoid extra import/runtime issues).
+    try {
+      final dynamic dyn = error;
+      final String typeName = dyn.runtimeType.toString();
+      extra['error_type'] = typeName;
+      if (typeName == 'PostgrestException') {
+        // Access common PostgrestException fields dynamically.
+        extra['postgrest_message'] = dyn.message ?? dyn.toString();
+        extra['postgrest_code'] = dyn.code ?? '';
+        extra['postgrest_details'] = dyn.details ?? '';
+      }
+    } catch (_) {
+      // ignore extraction failure
+    }
+
     await _repository.logError(
       source: 'AppViewModel',
       operation: operation,
       message: error.toString(),
       stackTrace: stackTrace?.toString(),
-      payload: payload,
+      payload: extra.isEmpty ? null : extra,
     );
   }
 }
