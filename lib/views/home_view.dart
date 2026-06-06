@@ -16,6 +16,8 @@ void _log(String method, String message) {
   print('In HomeView, Method: $method, $message');
 }
 
+const double _dropdownMenuMaxHeight = 240;
+
 class HomeView extends StatelessWidget {
   const HomeView({super.key, required this.viewModel});
 
@@ -47,6 +49,7 @@ class HomeView extends StatelessWidget {
                 child: DropdownButton<int>(
                   value: viewModel.currentCityId,
                   hint: const Text('Cidade'),
+                  menuMaxHeight: _dropdownMenuMaxHeight,
                   items: viewModel.cities.map((city) {
                     return DropdownMenuItem<int>(
                       value: city.id,
@@ -180,6 +183,25 @@ class _TicketsTabState extends State<_TicketsTab> {
     );
   }
 
+  bool _isValidBuyerData(_BuyerDialogResult buyer) {
+    final bool missingName = buyer.name.trim().isEmpty;
+    final bool missingPhone = _digitsOnly(buyer.phone).length != 11;
+    if (missingName || missingPhone) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _friendlyMissingBuyerMessage(
+              missingName: missingName,
+              missingPhone: missingPhone,
+            ),
+          ),
+        ),
+      );
+      return false;
+    }
+    return true;
+  }
+
   Future<void> _shareFilesDirectly(List<File> files) async {
     if (files.isEmpty) {
       return;
@@ -229,6 +251,89 @@ class _TicketsTabState extends State<_TicketsTab> {
         );
       }),
     );
+
+    if (!mounted) {
+      return;
+    }
+
+    await _shareFilesDirectly(files);
+    if (!mounted) {
+      return;
+    }
+    setState(() => _selectedTicketIds.clear());
+  }
+
+  Future<void> _sellSelectedTickets() async {
+    final List<Ticket> selected = widget.viewModel.searchedTickets
+        .where((Ticket t) => _selectedTicketIds.contains(t.id))
+        .toList();
+    if (selected.isEmpty) {
+      return;
+    }
+
+    final List<Ticket> alreadySold = selected
+        .where((Ticket t) => t.isSold)
+        .toList();
+    if (alreadySold.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Remova da seleção os bilhetes que já estão vendidos.'),
+        ),
+      );
+      return;
+    }
+
+    final _BuyerDialogResult? buyer = await _askBuyerData();
+    if (!mounted) {
+      return;
+    }
+    if (buyer == null) {
+      return;
+    }
+    if (!_isValidBuyerData(buyer)) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Processando venda dos bilhetes...')),
+    );
+
+    final List<File> files = <File>[];
+    for (final Ticket ticket in selected) {
+      final bool success = await widget.viewModel.toggleTicketSold(
+        ticketId: ticket.id,
+        sold: true,
+        buyerName: buyer.name.trim(),
+        buyerContact: buyer.phone,
+      );
+
+      if (!success) {
+        if (!mounted) {
+          return;
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Nao foi possivel vender o bilhete ${widget.viewModel.formatNumber(ticket.numbers.first)}. Tente novamente.',
+            ),
+          ),
+        );
+        return;
+      }
+
+      final List<Ticket> refreshed = widget.viewModel.searchedTickets
+          .where((Ticket t) => t.id == ticket.id)
+          .toList();
+      final Ticket soldTicket = refreshed.isNotEmpty ? refreshed.first : ticket;
+
+      files.add(
+        await _createTicketImageFromData(
+          ticket: soldTicket,
+          buyerName: buyer.name.trim(),
+          buyerPhoneDigits: _digitsOnly(buyer.phone),
+        ),
+      );
+    }
 
     if (!mounted) {
       return;
@@ -491,14 +596,22 @@ class _TicketsTabState extends State<_TicketsTab> {
                 label: const Text('Procurar'),
               ),
               const SizedBox(width: 12),
-              Text('Encontrados: ${tickets.length}'),
-              const SizedBox(width: 12),
-              if (_selectedTicketIds.isNotEmpty)
+              if (_selectedTicketIds.isNotEmpty) ...<Widget>[
+                FilledButton.icon(
+                  onPressed: _sellSelectedTickets,
+                  icon: const Icon(Icons.sell_outlined),
+                  label: Text('Vender (${_selectedTicketIds.length})'),
+                ),
+              ] else
+                Text('Encontrados: ${tickets.length}'),
+              if (_selectedTicketIds.isNotEmpty) ...<Widget>[
+                const SizedBox(width: 12),
                 FilledButton.icon(
                   onPressed: _shareSelectedTickets,
                   icon: const Icon(Icons.share_outlined),
                   label: Text('Enviar (${_selectedTicketIds.length})'),
                 ),
+              ],
             ],
           ),
           const SizedBox(height: 12),
@@ -1447,6 +1560,7 @@ class _ManageTabState extends State<_ManageTab> {
                 border: OutlineInputBorder(),
                 prefixIcon: Icon(Icons.person_outline),
               ),
+              menuMaxHeight: _dropdownMenuMaxHeight,
               items: widget.viewModel.sellers.map((AppUser seller) {
                 return DropdownMenuItem<int>(
                   value: seller.id,
@@ -1527,6 +1641,7 @@ class _ManageTabState extends State<_ManageTab> {
                 border: OutlineInputBorder(),
                 prefixIcon: Icon(Icons.person_outline),
               ),
+              menuMaxHeight: _dropdownMenuMaxHeight,
               items: widget.viewModel.sellers.map((AppUser seller) {
                 return DropdownMenuItem<int>(
                   value: seller.id,
@@ -1765,6 +1880,7 @@ class _ManageTabState extends State<_ManageTab> {
                     border: OutlineInputBorder(),
                     prefixIcon: Icon(Icons.person_outline),
                   ),
+                  menuMaxHeight: _dropdownMenuMaxHeight,
                   items: widget.viewModel.sellers.map((AppUser seller) {
                     return DropdownMenuItem<int>(
                       value: seller.id,
