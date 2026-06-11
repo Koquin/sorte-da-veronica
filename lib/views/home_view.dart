@@ -1,10 +1,12 @@
 // ignore_for_file: avoid_print
 
 import 'dart:io';
+import 'dart:math';
 
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_crazy_fortune_wheel/flutter_crazy_fortune_wheel.dart';
 import 'package:intl/intl.dart';
 
 import '../models/app_user.dart';
@@ -77,6 +79,10 @@ class HomeView extends StatelessWidget {
         ],
       ),
       body: currentBody,
+      floatingActionButton: isAdmin
+          ? _AdminRaffleFab(viewModel: viewModel)
+          : null,
+      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
       bottomNavigationBar: NavigationBar(
         selectedIndex: selectedNavIndex,
         onDestinationSelected: (int index) {
@@ -112,6 +118,320 @@ class HomeView extends StatelessWidget {
                 ),
               ],
       ),
+    );
+  }
+}
+
+class _AdminRaffleFab extends StatefulWidget {
+  const _AdminRaffleFab({required this.viewModel});
+
+  final AppViewModel viewModel;
+
+  @override
+  State<_AdminRaffleFab> createState() => _AdminRaffleFabState();
+}
+
+class _AdminRaffleFabState extends State<_AdminRaffleFab> {
+  Future<void> _openRaffle() async {
+    if (!widget.viewModel.isAdmin) {
+      return;
+    }
+
+    final List<Ticket> tickets = widget.viewModel.tickets;
+    if (tickets.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Nao ha bilhetes para sortear.')),
+      );
+      return;
+    }
+
+    final int? winnerNumber = await showDialog<int>(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return _TicketRaffleDialog(
+          tickets: tickets,
+          viewModel: widget.viewModel,
+        );
+      },
+    );
+
+    if (!mounted || winnerNumber == null) {
+      return;
+    }
+
+    await showDialog<void>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Numero sorteado'),
+          content: Text(
+            'Numero: ${widget.viewModel.formatNumber(winnerNumber)}',
+          ),
+          actions: <Widget>[
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Fechar'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!widget.viewModel.isAdmin) {
+      return const SizedBox.shrink();
+    }
+
+    return FloatingActionButton(
+      onPressed: _openRaffle,
+      tooltip: 'Sortear bilhete',
+      child: const Icon(Icons.casino_outlined),
+    );
+  }
+}
+
+class _TicketRaffleDialog extends StatefulWidget {
+  const _TicketRaffleDialog({required this.tickets, required this.viewModel});
+
+  final List<Ticket> tickets;
+  final AppViewModel viewModel;
+
+  @override
+  State<_TicketRaffleDialog> createState() => _TicketRaffleDialogState();
+}
+
+class _TicketRaffleDialogState extends State<_TicketRaffleDialog>
+    with TickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Ticket _winnerTicket;
+  late final int _winningNumber;
+  late final List<int> _winningDigits;
+  final List<int> _revealedDigits = <int>[];
+  int? _currentDigit;
+  bool _isDrawing = false;
+  bool _closed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final Random random = Random();
+    _winnerTicket = widget.tickets[random.nextInt(widget.tickets.length)];
+    _winningNumber = _raffleNumberForTicket(_winnerTicket, random);
+    _winningDigits = _digitsForNumber(_winningNumber);
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    );
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _runRaffle();
+      }
+    });
+  }
+
+  int _raffleNumberForTicket(Ticket ticket, Random random) {
+    final int rawNumber = ticket.numbers.isNotEmpty
+        ? ticket.numbers[random.nextInt(ticket.numbers.length)]
+        : 0;
+    final String text = rawNumber.toString().padLeft(4, '0');
+    return int.parse(text.substring(text.length - 4));
+  }
+
+  List<int> _digitsForNumber(int number) {
+    final String text = number.toString().padLeft(4, '0');
+    return text.substring(text.length - 4).split('').map(int.parse).toList();
+  }
+
+  Future<void> _runRaffle() async {
+    if (_isDrawing || _closed) {
+      return;
+    }
+
+    setState(() {
+      _isDrawing = true;
+      _revealedDigits.clear();
+    });
+
+    for (final int digit in _winningDigits) {
+      if (!mounted || _closed) {
+        return;
+      }
+
+      setState(() {
+        _currentDigit = digit;
+      });
+
+      await _controller.forward(from: 0);
+
+      if (!mounted || _closed) {
+        return;
+      }
+
+      setState(() {
+        _revealedDigits.add(digit);
+      });
+
+      await Future<void>.delayed(const Duration(milliseconds: 220));
+    }
+
+    if (!mounted || _closed) {
+      return;
+    }
+
+    _closed = true;
+    Navigator.of(context).pop(_winningNumber);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Widget _buildDigitWheel() {
+    final List<Widget> digitChildren = List<Widget>.generate(10, (int digit) {
+      return Padding(
+        padding: const EdgeInsets.all(20),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: const Color(0xFFF3F7F4),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: const Color(0xFF7DAE85), width: 1.5),
+          ),
+          child: Center(
+            child: Text(
+              digit.toString(),
+              style: const TextStyle(
+                fontSize: 34,
+                fontWeight: FontWeight.w900,
+                color: Color(0xFF1F4D25),
+              ),
+            ),
+          ),
+        ),
+      );
+    });
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: SizedBox(
+        width: 68,
+        height: 92,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: const Color(0xFFE9F5EB),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: const Color(0xFF4D7E57), width: 2),
+            boxShadow: const <BoxShadow>[
+              BoxShadow(
+                color: Color(0x22000000),
+                blurRadius: 10,
+                offset: Offset(0, 4),
+              ),
+            ],
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(18),
+            child: NormalWheel(
+              animation: _controller,
+              children: digitChildren,
+              winnerIndex: _currentDigit ?? 0,
+              scaling: 0.92,
+              rotations: 8,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildResultBox(int index) {
+    final bool hasDigit = index < _revealedDigits.length;
+    final String label = hasDigit ? _revealedDigits[index].toString() : '_';
+    return Container(
+      width: 54,
+      height: 54,
+      alignment: Alignment.center,
+      margin: const EdgeInsets.symmetric(horizontal: 6),
+      decoration: BoxDecoration(
+        color: hasDigit ? const Color(0xFFE9F5EB) : const Color(0xFFF3F7F4),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFF4D7E57), width: 1.5),
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(
+          fontSize: 28,
+          fontWeight: FontWeight.w900,
+          color: Color(0xFF1F4D25),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Sorteio de numero'),
+      content: SingleChildScrollView(
+        child: SizedBox(
+          width: 380,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              const Text(
+                'A roleta vai girar 4 vezes e montar um numero de 4 digitos.',
+              ),
+              const SizedBox(height: 12),
+              if (_isDrawing && _currentDigit != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: Text(
+                    'Rodada ${_revealedDigits.length + 1}',
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF1F4D25),
+                    ),
+                  ),
+                ),
+              SizedBox(
+                height: 176,
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: <Widget>[
+                    _buildDigitWheel(),
+                    const SizedBox(height: 12),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: <Widget>[
+                        _buildResultBox(0),
+                        _buildResultBox(1),
+                        _buildResultBox(2),
+                        _buildResultBox(3),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(
+          onPressed: () {
+            _closed = true;
+            _controller.stop();
+            Navigator.of(context).pop();
+          },
+          child: const Text('Cancelar'),
+        ),
+      ],
     );
   }
 }
@@ -666,7 +986,9 @@ class _TicketsTabState extends State<_TicketsTab> {
                                   'Vendedor: ${ticket.sellerId == null ? '-' : widget.viewModel.sellerNameById(ticket.sellerId!)}',
                                 ),
                                 Text(
-                                  'Criado: ${DateFormat('dd/MM/yyyy').format(ticket.createdAt)}',
+                                  ticket.isSold && ticket.soldAt != null
+                                      ? 'Vendido: ${DateFormat('dd/MM/yyyy').format(ticket.soldAt!)}'
+                                      : 'Criado: ${DateFormat('dd/MM/yyyy').format(ticket.createdAt)}',
                                 ),
                               ],
                             ),

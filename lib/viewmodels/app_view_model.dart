@@ -35,6 +35,7 @@ class AppViewModel extends ChangeNotifier {
   AppUser? get currentUser => _repository.currentUser;
   bool get isLoggedIn => _repository.currentUser != null;
   bool get isAdmin => _repository.isAdmin;
+  List<Ticket> get tickets => _repository.tickets;
   List<AppUser> get sellers => _repository.sellers;
   List<AppCity> get cities => _repository.cities;
   int? get currentCityId => _repository.currentCityId;
