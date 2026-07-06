@@ -252,6 +252,9 @@ class LotteryRepository {
           .join(' ')
           .toLowerCase();
       final String buyer = (ticket.buyerName ?? '').toLowerCase();
+      final String seller = ticket.sellerId == null
+          ? ''
+          : sellerNameById(ticket.sellerId!).toLowerCase();
       final String created = dateFormat.format(ticket.createdAt).toLowerCase();
       final String sold = ticket.soldAt == null
           ? ''
@@ -259,6 +262,7 @@ class LotteryRepository {
 
       return numbersString.contains(text) ||
           buyer.contains(text) ||
+          seller.contains(text) ||
           created.contains(text) ||
           sold.contains(text);
     }).toList();

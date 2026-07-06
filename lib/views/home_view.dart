@@ -889,7 +889,8 @@ class _TicketsTabState extends State<_TicketsTab> {
             controller: _searchController,
             decoration: InputDecoration(
               prefixIcon: const Icon(Icons.search),
-              labelText: 'Buscar por nome, numero (0001) ou data (dd/MM/yyyy)',
+              labelText:
+                  'Buscar por nome, vendedor, numero (0001) ou data (dd/MM/yyyy)',
               border: const OutlineInputBorder(),
               suffixIcon: IconButton(
                 onPressed: () {
@@ -1076,6 +1077,7 @@ class _ManageTabState extends State<_ManageTab> {
 
   int? _selectedSellerId;
   int? _selectedSellerCrudId;
+  final Set<int> _selectedQuantitySellerIds = <int>{};
   int _currentCrudPage = 0;
   int _currentSellerCrudPage = 0;
 
@@ -1238,36 +1240,150 @@ class _ManageTabState extends State<_ManageTab> {
       '_ManageTabState._assignByQuantity',
       'Assigning tickets by quantity via UI',
     );
-    final int? sellerId = _safeSellerId(_selectedSellerId);
-    if (sellerId == null) {
+    final List<AppUser> selectedSellers = widget.viewModel.sellers
+        .where(
+          (AppUser seller) => _selectedQuantitySellerIds.contains(seller.id),
+        )
+        .toList();
+    if (selectedSellers.isEmpty) {
       _log(
         '_ManageTabState._assignByQuantity',
-        'No seller selected, returning',
+        'No sellers selected, returning',
       );
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Selecione um vendedor valido.')),
+        const SnackBar(content: Text('Selecione ao menos um vendedor valido.')),
       );
       return;
     }
 
     final int quantity =
         int.tryParse(_quantityAssignController.text.trim()) ?? -1;
+    if (quantity <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Informe uma quantidade valida.')),
+      );
+      return;
+    }
 
-    final int? updated = await widget.viewModel.assignByQuantity(
-      quantity: quantity,
-      sellerId: sellerId,
-    );
+    int totalUpdated = 0;
+    bool hasFailure = false;
+    for (final AppUser seller in selectedSellers) {
+      final int? updated = await widget.viewModel.assignByQuantity(
+        quantity: quantity,
+        sellerId: seller.id,
+      );
+      if (updated == null) {
+        hasFailure = true;
+        continue;
+      }
+      totalUpdated += updated;
+    }
 
     if (!mounted) {
       return;
     }
 
-    final String message = updated == null
+    final String message = hasFailure && totalUpdated == 0
         ? 'Nao foi possivel atribuir bilhetes agora. Tente novamente.'
-        : '$updated bilhete(s) atribuido(s) por quantidade.';
+        : hasFailure
+        ? '$totalUpdated bilhete(s) atribuido(s), mas alguns vendedores falharam.'
+        : 'Atribuicao realizada com sucesso: $totalUpdated bilhete(s) para ${selectedSellers.length} vendedor(es).';
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  void _setAllQuantitySellers(bool selected) {
+    setState(() {
+      _selectedQuantitySellerIds
+        ..clear()
+        ..addAll(
+          selected
+              ? widget.viewModel.sellers.map((AppUser seller) => seller.id)
+              : const <int>[],
+        );
+    });
+  }
+
+  Widget _buildQuantitySellerSelection(BuildContext context) {
+    final List<AppUser> sellers = widget.viewModel.sellers;
+    if (sellers.isEmpty) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF6FBF8),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFFD8EADF)),
+        ),
+        child: const Text('Nenhum vendedor disponivel para selecao.'),
+      );
+    }
+
+    final bool allSelected =
+        sellers.isNotEmpty &&
+        _selectedQuantitySellerIds.length == sellers.length;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF6FBF8),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFD8EADF)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  'Vendedores para a quantidade',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+              ),
+              TextButton(
+                onPressed: () => _setAllQuantitySellers(!allSelected),
+                child: Text(allSelected ? 'Desmarcar todos' : 'Marcar todos'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 440),
+            child: ListView.builder(
+              itemCount: sellers.length,
+              itemBuilder: (BuildContext context, int index) {
+                final AppUser seller = sellers[index];
+                final bool selected = _selectedQuantitySellerIds.contains(
+                  seller.id,
+                );
+                return CheckboxListTile(
+                  value: selected,
+                  onChanged: (bool? value) {
+                    setState(() {
+                      if (value == true) {
+                        _selectedQuantitySellerIds.add(seller.id);
+                      } else {
+                        _selectedQuantitySellerIds.remove(seller.id);
+                      }
+                    });
+                  },
+                  title: Text(seller.name),
+                  subtitle: seller.contact == null
+                      ? null
+                      : Text(seller.contact!),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  controlAffinity: ListTileControlAffinity.leading,
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _createCity() async {
@@ -2275,10 +2391,12 @@ class _ManageTabState extends State<_ManageTab> {
                   ),
                 ),
                 const SizedBox(height: 10),
+                _buildQuantitySellerSelection(context),
+                const SizedBox(height: 10),
                 FilledButton.icon(
                   onPressed: _assignByQuantity,
                   icon: const Icon(Icons.assignment_outlined),
-                  label: const Text('Atribuir por quantidade'),
+                  label: const Text('Atribuir para selecionados'),
                 ),
               ],
             ),
