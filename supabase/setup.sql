@@ -211,6 +211,7 @@ as $$
 declare
   v_user app_user%rowtype;
   v_session app_session%rowtype;
+  v_effective_city_id bigint;
 begin
   select * into v_session
   from app_session s
@@ -225,8 +226,13 @@ begin
     raise exception 'Usuario nao encontrado.';
   end if;
 
+  v_effective_city_id := case
+    when v_user.is_admin and v_user.id = 1 then v_session.city_id
+    else v_user.city_id
+  end;
+
   return query
-  select v_user.id, v_user.is_admin, v_session.city_id, v_user.city_id;
+  select v_user.id, v_user.is_admin, v_effective_city_id, v_user.city_id;
 end;
 $$;
 
@@ -239,10 +245,12 @@ as $$
   with mine as (
     select c.id, c.name
     from city c
-    where p_is_admin
-       or c.id = p_default_city
+    where (p_is_admin and p_user_id = 1)
+       or (p_is_admin and p_user_id <> 1 and c.id = p_default_city)
+       or (not p_is_admin and c.id = p_default_city)
        or exists (
-         select 1 from user_city_access a
+         select 1
+         from user_city_access a
          where a.user_id = p_user_id and a.city_id = c.id
        )
   )
@@ -275,9 +283,13 @@ begin
   end if;
 
   if v_user.is_admin then
-    select c.id into v_city_id from city c where lower(c.name) = 'teresina' limit 1;
-    if v_city_id is null then
-      select id into v_city_id from city order by id limit 1;
+    if v_user.id = 1 then
+      select c.id into v_city_id from city c where lower(c.name) = 'teresina' limit 1;
+      if v_city_id is null then
+        select id into v_city_id from city order by id limit 1;
+      end if;
+    else
+      v_city_id := v_user.city_id;
     end if;
   else
     select a.city_id into v_city_id
@@ -336,7 +348,9 @@ begin
   end if;
 
   if v_user.is_admin then
-    null;
+    if v_user.id <> 1 and p_city_id <> v_user.city_id then
+      raise exception 'Usuario nao possui acesso a esta cidade.';
+    end if;
   elsif not exists (
     select 1
     from app_accessible_cities(v_user.id, false, v_user.city_id) c
@@ -380,6 +394,7 @@ as $$
 declare
   v_session app_session%rowtype;
   v_user app_user%rowtype;
+  v_effective_city_id bigint;
 begin
   select * into v_session
   from app_session s
@@ -394,8 +409,13 @@ begin
     return null;
   end if;
 
+  v_effective_city_id := case
+    when v_user.is_admin and v_user.id = 1 then v_session.city_id
+    else v_user.city_id
+  end;
+
   return jsonb_build_object(
-    'city_id', v_session.city_id,
+    'city_id', v_effective_city_id,
     'user', jsonb_build_object(
       'id', v_user.id,
       'user_name', v_user.user_name,
@@ -435,7 +455,11 @@ begin
   select * into v_ctx from app_get_session_user(p_token);
 
   if v_ctx.is_admin then
-    v_allowed := exists (select 1 from city where id = p_city_id);
+    if v_ctx.user_id = 1 then
+      v_allowed := exists (select 1 from city where id = p_city_id);
+    else
+      v_allowed := p_city_id = v_ctx.user_city_id;
+    end if;
   else
     v_allowed := exists (
       select 1
@@ -805,6 +829,10 @@ begin
     raise exception 'Apenas administradores podem criar cidades.';
   end if;
 
+  if v_ctx.user_id <> 1 then
+    raise exception 'Apenas o administrador principal pode criar cidades.';
+  end if;
+
   if coalesce(trim(p_name), '') = '' then
     raise exception 'Nome da cidade e obrigatorio.';
   end if;
@@ -856,6 +884,10 @@ begin
 
   if not found then
     raise exception 'Vendedor nao encontrado.';
+  end if;
+
+  if v_ctx.user_id <> 1 and v_user.city_id is distinct from v_ctx.city_id then
+    raise exception 'Sem permissao para editar vendedor de outra cidade.';
   end if;
 
   if coalesce(trim(p_user_name), '') = '' then
@@ -932,6 +964,15 @@ begin
     return false;
   end if;
 
+  if v_ctx.user_id <> 1 and exists (
+    select 1
+    from app_user u
+    where u.id = p_seller_id
+      and u.city_id is distinct from v_ctx.city_id
+  ) then
+    raise exception 'Sem permissao para excluir vendedor de outra cidade.';
+  end if;
+
   if exists (
     select 1
     from ticket t
@@ -991,19 +1032,43 @@ begin
   v_start := lpad(p_start::text, 4, '0');
   v_end := lpad(p_end::text, 4, '0');
 
-  update ticket t
-  set seller_id = p_seller_id,
-      assigned_by = v_ctx.user_id
-  where t.city_id = v_ctx.city_id
-    and exists (
-      select 1
-      from ticket_numbers tn
-      where tn.ticket_id = t.id
-        and tn.city_id = v_ctx.city_id
-        and tn.number between v_start and v_end
-    );
+  create temporary table if not exists tmp_affected_tickets (
+    id bigint not null,
+    is_sold boolean not null
+  ) on commit drop;
 
-  get diagnostics v_updated = row_count;
+  truncate table tmp_affected_tickets;
+
+  with affected as (
+    update ticket t
+    set seller_id = p_seller_id,
+        assigned_by = v_ctx.user_id,
+        is_sold = case when t.is_sold then false else t.is_sold end,
+        sold_at = case when t.is_sold then null else t.sold_at end,
+        buyer_name = case when t.is_sold then null else t.buyer_name end,
+        buyer_contact = case when t.is_sold then null else t.buyer_contact end
+    where t.city_id = v_ctx.city_id
+      and exists (
+        select 1
+        from ticket_numbers tn
+        where tn.ticket_id = t.id
+          and tn.city_id = v_ctx.city_id
+          and tn.number between v_start and v_end
+      )
+    returning t.id, t.is_sold
+  )
+  insert into tmp_affected_tickets (id, is_sold)
+  select a.id, a.is_sold
+  from affected a;
+
+  delete from sale s
+  where s.ticket_id in (
+    select a.id
+    from tmp_affected_tickets a
+    where a.is_sold = false
+  );
+
+  select count(*) into v_updated from tmp_affected_tickets;
   return v_updated;
 end;
 $$;
@@ -1048,19 +1113,43 @@ begin
     raise exception 'Numeros invalidos.';
   end if;
 
-  update ticket t
-  set seller_id = p_seller_id,
-      assigned_by = v_ctx.user_id
-  where t.city_id = v_ctx.city_id
-    and exists (
-      select 1
-      from ticket_numbers tn
-      where tn.ticket_id = t.id
-        and tn.city_id = v_ctx.city_id
-        and tn.number = any(v_formatted)
-    );
+  create temporary table if not exists tmp_affected_tickets (
+    id bigint not null,
+    is_sold boolean not null
+  ) on commit drop;
 
-  get diagnostics v_updated = row_count;
+  truncate table tmp_affected_tickets;
+
+  with affected as (
+    update ticket t
+    set seller_id = p_seller_id,
+        assigned_by = v_ctx.user_id,
+        is_sold = case when t.is_sold then false else t.is_sold end,
+        sold_at = case when t.is_sold then null else t.sold_at end,
+        buyer_name = case when t.is_sold then null else t.buyer_name end,
+        buyer_contact = case when t.is_sold then null else t.buyer_contact end
+    where t.city_id = v_ctx.city_id
+      and exists (
+        select 1
+        from ticket_numbers tn
+        where tn.ticket_id = t.id
+          and tn.city_id = v_ctx.city_id
+          and tn.number = any(v_formatted)
+      )
+    returning t.id, t.is_sold
+  )
+  insert into tmp_affected_tickets (id, is_sold)
+  select a.id, a.is_sold
+  from affected a;
+
+  delete from sale s
+  where s.ticket_id in (
+    select a.id
+    from tmp_affected_tickets a
+    where a.is_sold = false
+  );
+
+  select count(*) into v_updated from tmp_affected_tickets;
   return v_updated;
 end;
 $$;
@@ -1096,21 +1185,45 @@ begin
     raise exception 'Vendedor invalido.';
   end if;
 
-  update ticket t
-  set seller_id = p_seller_id,
-      assigned_by = v_ctx.user_id
-  where t.city_id = v_ctx.city_id
-    and t.seller_id is null
-    and t.id in (
-      select t2.id
-      from ticket t2
-      where t2.city_id = v_ctx.city_id
-        and t2.seller_id is null
-      order by t2.id
-      limit p_quantity
-    );
+  create temporary table if not exists tmp_affected_tickets (
+    id bigint not null,
+    is_sold boolean not null
+  ) on commit drop;
 
-  get diagnostics v_updated = row_count;
+  truncate table tmp_affected_tickets;
+
+  with affected as (
+    update ticket t
+    set seller_id = p_seller_id,
+        assigned_by = v_ctx.user_id,
+        is_sold = case when t.is_sold then false else t.is_sold end,
+        sold_at = case when t.is_sold then null else t.sold_at end,
+        buyer_name = case when t.is_sold then null else t.buyer_name end,
+        buyer_contact = case when t.is_sold then null else t.buyer_contact end
+    where t.city_id = v_ctx.city_id
+      and t.seller_id is null
+      and t.id in (
+        select t2.id
+        from ticket t2
+        where t2.city_id = v_ctx.city_id
+          and t2.seller_id is null
+        order by t2.id
+        limit p_quantity
+      )
+    returning t.id, t.is_sold
+  )
+  insert into tmp_affected_tickets (id, is_sold)
+  select a.id, a.is_sold
+  from affected a;
+
+  delete from sale s
+  where s.ticket_id in (
+    select a.id
+    from tmp_affected_tickets a
+    where a.is_sold = false
+  );
+
+  select count(*) into v_updated from tmp_affected_tickets;
   return v_updated;
 end;
 $$;

@@ -29,6 +29,17 @@ class HomeView extends StatelessWidget {
   Widget build(BuildContext context) {
     _log('build', 'Building HomeView with currentTab=${viewModel.currentTab}');
     final bool isAdmin = viewModel.isAdmin;
+    final bool isSuperAdmin = viewModel.isSuperAdmin;
+    String? currentCityName;
+    final int? userCityId = viewModel.currentUser?.cityId;
+    if (userCityId != null) {
+      for (final city in viewModel.cities) {
+        if (city.id == userCityId) {
+          currentCityName = city.name;
+          break;
+        }
+      }
+    }
     final Widget ticketsTab = _TicketsTab(viewModel: viewModel);
     final Widget manageTab = _ManageTab(viewModel: viewModel);
     final Widget statsTab = _StatsTab(viewModel: viewModel);
@@ -44,7 +55,7 @@ class HomeView extends StatelessWidget {
       appBar: AppBar(
         title: Text(viewModel.currentUser?.name ?? ''),
         actions: <Widget>[
-          if (viewModel.cities.isNotEmpty)
+          if (isSuperAdmin && viewModel.cities.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(right: 8),
               child: DropdownButtonHideUnderline(
@@ -69,6 +80,16 @@ class HomeView extends StatelessWidget {
                             viewModel.switchCity(value);
                           }
                         },
+                ),
+              ),
+            )
+          else if (isAdmin && currentCityName != null)
+            Padding(
+              padding: const EdgeInsets.only(right: 12),
+              child: Center(
+                child: Text(
+                  currentCityName,
+                  style: const TextStyle(fontWeight: FontWeight.w600),
                 ),
               ),
             ),
@@ -1130,6 +1151,12 @@ class _ManageTabState extends State<_ManageTab> {
     }
     return null;
   }
+  
+  int _assignedTicketsCount() {
+    return widget.viewModel.tickets.where((Ticket ticket) {
+      return ticket.sellerId != null;
+    }).length;
+  }
 
   int? _safeSellerId(int? sellerId) {
     return _findSellerById(sellerId)?.id;
@@ -1351,7 +1378,7 @@ class _ManageTabState extends State<_ManageTab> {
           ),
           const SizedBox(height: 4),
           ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 440),
+            constraints: const BoxConstraints(maxHeight: 300),
             child: ListView.builder(
               itemCount: sellers.length,
               itemBuilder: (BuildContext context, int index) {
@@ -2278,7 +2305,7 @@ class _ManageTabState extends State<_ManageTab> {
                 ),
               ],
             ),
-          if (admin) ...<Widget>[
+          if (widget.viewModel.isSuperAdmin) ...<Widget>[
             _buildSectionContainer(
               context: context,
               title: 'Criação de Cidade',
@@ -2301,6 +2328,8 @@ class _ManageTabState extends State<_ManageTab> {
                 ),
               ],
             ),
+          ],
+            if (widget.viewModel.isAdmin || widget.viewModel.isSuperAdmin) ...<Widget>[
             _buildSellerCrudCarousel(context),
             const SizedBox(height: 16),
             _buildTicketCrudCarousel(context),
@@ -2311,6 +2340,20 @@ class _ManageTabState extends State<_ManageTab> {
               subtitle: 'Vincule por intervalo ou por números específicos',
               icon: Icons.hub_outlined,
               children: <Widget>[
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF6FBF8),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFFD8EADF)),
+                  ),
+                  child: Text(
+                    'Bilhetes atribuídos no momento: ${_assignedTicketsCount()}',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                ),
+                const SizedBox(height: 10),
                 DropdownButtonFormField<int>(
                   initialValue: _safeSellerId(_selectedSellerId),
                   decoration: const InputDecoration(
